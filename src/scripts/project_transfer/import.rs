@@ -172,7 +172,13 @@ pub async fn import_project(
 
     // Before the goals, which list them: by the time a goal is built the numbering holds only the releases
     // that are really arriving.
-    let releases = build_releases(&project, &releases_file, &mut numbers, &mut skipped);
+    let releases = build_releases(
+        &project,
+        &releases_file,
+        &mut numbers,
+        &mut comments_by_target,
+        &mut skipped,
+    );
 
     let mut goals: Vec<GoalModel> = Vec::with_capacity(goals_file.goals.len());
 
@@ -798,12 +804,13 @@ fn build_releases(
     project: &ProjectModel,
     file: &ReleasesFile,
     numbers: &mut Numbering,
+    comments: &mut AHashMap<String, Vec<CommentModel>>,
     skipped: &mut Vec<SkippedImport>,
 ) -> Vec<ReleaseModel> {
     let mut releases = Vec::with_capacity(file.releases.len());
 
     for release in &file.releases {
-        match build_release(project, release, numbers) {
+        match build_release(project, release, numbers, comments) {
             Ok(model) => releases.push(model),
             Err(err) => {
                 numbers.releases.remove(&normalise_handle(&release.id));
@@ -819,6 +826,7 @@ fn build_release(
     project: &ProjectModel,
     src: &ReleaseFileModel,
     numbers: &Numbering,
+    comments: &mut AHashMap<String, Vec<CommentModel>>,
 ) -> Result<ReleaseModel, String> {
     let handle = normalise_handle(&src.id);
 
@@ -864,6 +872,15 @@ fn build_release(
         release_notes: decode_text(&src.release_notes_base64, "a release's notes")?,
         date: decode_moment(&src.date, "a release's date")?,
         services,
+        // The moment it reached production THERE, kept — an import is not a rollout, and a release that
+        // went live in March must not arrive saying it did so today.
+        released_on_prod_moment: decode_optional_moment(
+            src.released_on_prod.as_deref(),
+            "a release's released_on_prod",
+        )?,
+        // Its thread out of the same map the cards take theirs from: `comments.yaml` names what a comment
+        // is on by handle, and a release's handle is as unambiguous as a task's.
+        comments: comments.remove(&handle).unwrap_or_default(),
         created: decode_moment(&src.created, "a release's created")?,
         updated: decode_moment(&src.updated, "a release's updated")?,
         deleted_moment: decode_optional_moment(src.deleted.as_deref(), "a release's deleted")?,
@@ -1534,7 +1551,8 @@ mod tests {
         assert_eq!(back.releases.len(), 2);
 
         let landed =
-            build_release(&target, &back.releases[0], &numbers).expect("the release should build");
+            build_release(&target, &back.releases[0], &numbers, &mut AHashMap::new())
+                .expect("the release should build");
 
         assert_eq!(landed.project_id, "p1", "on the board it arrived at");
         assert_eq!(landed.number, 51, "under this board's number, not R12");
@@ -1543,7 +1561,8 @@ mod tests {
 
         // The deleted one arrives too, and arrives deleted — at the moment it was, not at the import's.
         let landed_recalled =
-            build_release(&target, &back.releases[1], &numbers).expect("the release should build");
+            build_release(&target, &back.releases[1], &numbers, &mut AHashMap::new())
+                .expect("the release should build");
 
         assert_eq!(landed_recalled.number, 52);
         assert!(landed_recalled.is_deleted());
@@ -1909,6 +1928,12 @@ mod tests {
                     description: String::new(),
                 },
             ],
+            // On production two days after it first went out — a fourth moment unlike the others, so it
+            // cannot arrive as `date`, as `created` or as the day of the import and still pass.
+            released_on_prod_moment: Some(moment("2026-10-09T16:20:00.000000Z")),
+            // Left empty here: a thread does not travel in `releases.yaml`. The tests that are about it
+            // put one in `comments.yaml`, which is where the export writes it.
+            comments: Vec::new(),
             // Written down the day after it went out, and corrected the day after that: three moments
             // that are all different, so one arriving in another's place cannot pass.
             created: moment("2026-10-08T09:00:00.000000Z"),
@@ -1934,6 +1959,7 @@ mod tests {
         assert_eq!(landed.date, left.date);
         // Every service, every field of each, and in the order they were added.
         assert_eq!(landed.services, left.services);
+        assert_eq!(landed.released_on_prod_moment, left.released_on_prod_moment);
         assert_eq!(landed.created, left.created);
         assert_eq!(landed.updated, left.updated);
         assert_eq!(landed.deleted_moment, left.deleted_moment);
@@ -2182,6 +2208,7 @@ mod tests {
                 releases: vec![a_release_file_model("TM-R12"), unreadable],
             },
             &mut numbers,
+            &mut AHashMap::new(),
             &mut skipped,
         );
 
@@ -2249,6 +2276,7 @@ mod tests {
                 ],
             },
             &mut numbers,
+            &mut AHashMap::new(),
             &mut skipped,
         );
 
@@ -2401,6 +2429,7 @@ mod tests {
             &a_target_project(),
             &src,
             &numbering(&[], &[], &[("TM-R12", 51)]),
+            &mut AHashMap::new(),
         )
         .expect("the release should build");
 
@@ -2444,6 +2473,121 @@ mod tests {
         assert!(comments.contains_key("TM-99"), "somebody else's was not");
     }
 
+    /// **A release's thread and its production mark cross with it, written by the export itself.** The
+    /// thread is not in `releases.yaml` — it is in `comments.yaml` with every other, named by the
+    /// release's handle — so this goes the whole way round: the model the source board holds, through
+    /// the export's own `comments_file` and `release_to_file`, back through the grouping and the build.
+    /// The mark arrives as the moment it was, not as the day of the import.
+    #[test]
+    fn a_release_arrives_with_its_thread_and_its_production_mark() {
+        let source = a_source_project();
+
+        let mut shipped = a_release(12);
+        shipped.comments = vec![
+            CommentModel {
+                moment: moment("2026-10-07T15:00:00.000000Z"),
+                who: "yuri@example.com".to_string(),
+                text: "On the test stand.\n\n- `ttl`: added by hand".to_string(),
+            },
+            CommentModel {
+                moment: moment("2026-10-09T16:25:00.000000Z"),
+                who: "AI".to_string(),
+                text: "Rolled out to production, no errors in the first hour.".to_string(),
+            },
+        ];
+
+        // Somebody else's thread, to prove the release takes its own and only its own.
+        let mut goal = a_goal(7, &[12]);
+        goal.comments = vec![CommentModel {
+            moment: moment("2026-10-01T09:00:00.000000Z"),
+            who: "AI".to_string(),
+            text: "Splitting this in two.".to_string(),
+        }];
+
+        let comments = super::super::export::comments_file(
+            &source,
+            std::slice::from_ref(&goal),
+            &[],
+            std::slice::from_ref(&shipped),
+        );
+
+        assert_eq!(comments.comments.len(), 3);
+        assert_eq!(
+            comments
+                .comments
+                .iter()
+                .filter(|itm| itm.target == "TM-R12")
+                .count(),
+            2,
+            "a release's comments are named by its handle, as a card's are"
+        );
+
+        let mut skipped = Vec::new();
+        let mut threads = group_comments(&comments, &mut skipped);
+        let mut numbers = numbering(&[("TM-G7", 41)], &[], &[("TM-R12", 51)]);
+
+        let releases = build_releases(
+            &a_target_project(),
+            &ReleasesFile {
+                releases: vec![release_to_file(&source, &shipped)],
+            },
+            &mut numbers,
+            &mut threads,
+            &mut skipped,
+        );
+
+        assert!(skipped.is_empty());
+        assert_eq!(releases.len(), 1);
+
+        let landed = &releases[0];
+
+        assert_arrived_as_it_left(landed, &shipped);
+        assert!(landed.is_released_on_prod());
+        assert_eq!(
+            landed.released_on_prod_moment,
+            Some(moment("2026-10-09T16:20:00.000000Z")),
+            "when it reached production THERE"
+        );
+
+        assert_eq!(landed.comments.len(), 2);
+
+        for (landed, left) in landed.comments.iter().zip(shipped.comments.iter()) {
+            assert_eq!(landed.moment, left.moment);
+            assert_eq!(landed.who, left.who, "not re-signed by whoever imported it");
+            assert_eq!(landed.text, left.text);
+        }
+
+        assert!(!threads.contains_key("TM-R12"), "its thread was taken");
+        assert!(threads.contains_key("TM-G7"), "the goal's is still there for the goal");
+    }
+
+    /// A release that has not reached production says nothing about it in the file, and arrives the same
+    /// way — the absence is the statement.
+    #[test]
+    fn a_release_not_on_production_arrives_not_on_production() {
+        let mut staged = a_release(12);
+        staged.released_on_prod_moment = None;
+
+        let file = release_to_file(&a_source_project(), &staged);
+
+        assert!(file.released_on_prod.is_none());
+        assert!(
+            !serde_yaml::to_string(&file).unwrap().contains("released_on_prod"),
+            "an unset mark is left out of the file rather than written as null"
+        );
+
+        let landed = build_release(
+            &a_target_project(),
+            &file,
+            &numbering(&[], &[], &[("TM-R12", 51)]),
+            &mut AHashMap::new(),
+        )
+        .expect("the release should build");
+
+        assert!(!landed.is_released_on_prod());
+        assert!(landed.comments.is_empty());
+    }
+
     /// A goal handle where a task is expected — and the other way round — is a file somebody has edited into
     /// something this board cannot read, and it says so rather than building a card with a nonsense id.
     #[test]
@@ -2469,7 +2613,9 @@ mod tests {
         // them, so it is the id that refuses them and not the lookup — a task's handle and a goal's each
         // name something else on the board the file came from.
         for id in ["TM-12", "TM-G12"] {
-            let problem = build_release(&project, &a_release_file_model(id), &numbers).unwrap_err();
+            let problem =
+                build_release(&project, &a_release_file_model(id), &numbers, &mut AHashMap::new())
+                    .unwrap_err();
 
             assert!(problem.contains(id), "{problem}");
         }

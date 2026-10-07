@@ -6,7 +6,10 @@ use task_manager_shared::releases::{ReleaseResponse, moment_for_display};
 
 use crate::states::AppState;
 
-use super::{ComponentState, SERVICES_ON_A_ROW, includes_service, microservices_of};
+use super::{
+    ComponentState, NOT_ON_PROD, ON_PROD, SERVICES_ON_A_ROW, includes_service,
+    matches_prod_filter, microservices_of,
+};
 
 /// What has gone out, newest first.
 ///
@@ -96,10 +99,12 @@ pub fn RenderReleases() -> Element {
     };
 
     let service_filter = cs_ra.service_filter.as_str();
+    let prod_filter = cs_ra.prod_filter.as_str();
 
     let shown: Vec<ReleaseResponse> = releases
         .iter()
         .filter(|release| includes_service(release, service_filter))
+        .filter(|release| matches_prod_filter(release, prod_filter))
         .cloned()
         .collect();
 
@@ -113,7 +118,7 @@ pub fn RenderReleases() -> Element {
                 .to_string(),
         )
     } else {
-        Some(format!("No release on this board includes {service_filter}."))
+        Some("No release on this board matches these filters.".to_string())
     };
 
     let expanded = cs_ra.expanded.clone();
@@ -245,6 +250,7 @@ fn RenderHeader(
     let cs_ra = cs.read();
     let selected_prefix = cs_ra.selected.clone();
     let service_filter = cs_ra.service_filter.clone();
+    let prod_filter = cs_ra.prod_filter.clone();
     drop(cs_ra);
 
     let mut cs = cs;
@@ -280,6 +286,19 @@ fn RenderHeader(
                             selected: *service == service_filter,
                             "{service}"
                         }
+                    }
+                }
+                // What has actually reached production. A release is recorded when it ships anywhere,
+                // so the unfiltered list is everything that went out; this is what narrows it to what
+                // is live — and, with a service picked beside it, to the version of it users are on.
+                select {
+                    onchange: move |event| cs.write().set_prod_filter(event.value()),
+                    option { value: "", selected: prod_filter.is_empty(), "Any stage" }
+                    option { value: ON_PROD, selected: prod_filter == ON_PROD, "On prod" }
+                    option {
+                        value: NOT_ON_PROD,
+                        selected: prod_filter == NOT_ON_PROD,
+                        "Not on prod yet"
                     }
                 }
             }
@@ -322,8 +341,9 @@ fn RenderRelease(release: ReleaseResponse, open: bool, cs: Signal<ComponentState
                 }
 
                 div { class: "release-meta",
-                    // The goal it shipped, in that goal's own colour: on this screen a release is a title
-                    // and some versions, and the goal is what says which feature that was.
+                    // The goal it shipped, in that goal's own colour — by id alone. The name is in the
+                    // tooltip and in the open release: on one line it was competing for room with the
+                    // versions, and a release's own title usually says what the goal's would.
                     for goal in release.goals.iter() {
                         span {
                             class: "release-goal",
@@ -331,10 +351,10 @@ fn RenderRelease(release: ReleaseResponse, open: bool, cs: Signal<ComponentState
                             style: "border-left-color: {KindColor::parse_or_default(&goal.color).hex()}",
                             title: "{goal.id} · {goal.name}",
                             span { class: "goal-id", "{goal.id}" }
-                            span { class: "release-goal-name", "{goal.name}" }
                         }
                     }
 
+                    crate::dialogs::ReleaseProdFlag { release: release.clone() }
                     crate::dialogs::ReleaseSettingsFlag { release: release.clone() }
 
                     for service in release.services.iter().take(SERVICES_ON_A_ROW) {
@@ -351,12 +371,38 @@ fn RenderRelease(release: ReleaseResponse, open: bool, cs: Signal<ComponentState
                         span { class: "release-more", title: "{all_services}", "+{more_services}" }
                     }
 
+                    // Drawn only when there is one, like the same count on a goal's row.
+                    if !release.comments.is_empty() {
+                        span {
+                            class: "goal-comments",
+                            title: "{release.comments.len()} notes on the thread — open the release to read them",
+                            "💬 {release.comments.len()}"
+                        }
+                    }
+
                     span { class: "release-date", "{date}" }
                 }
             }
 
             if open {
                 div { class: "release-body",
+                    // Which feature this was, in full. Here and not inside `ReleaseDetails`, because
+                    // that body is also drawn under the goal itself, where naming the goal would be
+                    // telling the reader what dialog they are in.
+                    if !release.goals.is_empty() {
+                        div { class: "release-goals",
+                            for goal in release.goals.iter() {
+                                span {
+                                    class: "release-goal",
+                                    key: "{goal.id}",
+                                    style: "border-left-color: {KindColor::parse_or_default(&goal.color).hex()}",
+                                    span { class: "goal-id", "{goal.id}" }
+                                    span { "{goal.name}" }
+                                }
+                            }
+                        }
+                    }
+
                     crate::dialogs::ReleaseDetails { release: release.clone() }
                 }
             }

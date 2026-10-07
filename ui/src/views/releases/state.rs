@@ -1,12 +1,19 @@
 use dioxus_utils::DataState;
 use task_manager_shared::projects::ProjectResponse;
-use task_manager_shared::releases::ReleaseResponse;
+use task_manager_shared::releases::{ReleaseResponse, is_released_on_prod};
 
 /// How many services a folded release names before the rest are counted rather than listed.
 ///
 /// A row is one line. Three chips say which release this is for nearly every release there is — one
 /// feature rarely touches more — and the count after them says there is more without widening the row.
 pub const SERVICES_ON_A_ROW: usize = 3;
+
+/// The two values the production filter can take besides "any", which is the empty string.
+///
+/// Strings rather than an enum because they are also the values of the `<option>`s that set them, and
+/// one vocabulary for the control and the state is what keeps the two from drifting.
+pub const ON_PROD: &str = "prod";
+pub const NOT_ON_PROD: &str = "not-prod";
 
 #[derive(Default)]
 pub struct ComponentState {
@@ -19,6 +26,10 @@ pub struct ComponentState {
     pub expanded: Vec<String>,
     /// Which microservice is being looked at, by its id — empty for all of them.
     pub service_filter: String,
+    /// Which releases are on screen by whether they have reached production: [`ON_PROD`],
+    /// [`NOT_ON_PROD`], or empty for both. Deliberately NOT reset by `select`, unlike the service above:
+    /// it is how this reader wants releases shown — "what is live" — and not something about one board.
+    pub prod_filter: String,
 }
 
 impl ComponentState {
@@ -46,6 +57,10 @@ impl ComponentState {
 
     pub fn set_service_filter(&mut self, microservice_id: String) {
         self.service_filter = microservice_id;
+    }
+
+    pub fn set_prod_filter(&mut self, value: String) {
+        self.prod_filter = value;
     }
 
     /// A push that carried the board: what it says replaces what is shown, with no request.
@@ -84,6 +99,16 @@ pub fn includes_service(release: &ReleaseResponse, microservice_id: &str) -> boo
             .any(|service| service.microservice_id == microservice_id)
 }
 
+/// Whether a release is on screen under the production filter. Anything that is not one of the two
+/// values shows everything — an empty box and a value this build does not know are the same screen.
+pub fn matches_prod_filter(release: &ReleaseResponse, filter: &str) -> bool {
+    match filter {
+        ON_PROD => is_released_on_prod(release),
+        NOT_ON_PROD => !is_released_on_prod(release),
+        _ => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use task_manager_shared::releases::ServiceReleaseResponse;
@@ -110,9 +135,32 @@ mod tests {
                 })
                 .collect(),
             goals: Vec::new(),
+            released_on_prod_unix_seconds: None,
+            comments: Vec::new(),
             created_unix_seconds: 0,
             updated_unix_seconds: 0,
             deleted_unix_seconds: None,
+        }
+    }
+
+    /// "What is live" and "what has not got there yet" are the two questions the mark exists for, and
+    /// between them they are every release — nothing is on neither list.
+    #[test]
+    fn a_release_is_on_one_side_of_the_production_filter_or_the_other() {
+        let staged = release("RMS-R1", &["rest-api"]);
+
+        let mut live = release("RMS-R2", &["rest-api"]);
+        live.released_on_prod_unix_seconds = Some(1_791_331_200);
+
+        assert!(matches_prod_filter(&live, ON_PROD));
+        assert!(!matches_prod_filter(&live, NOT_ON_PROD));
+
+        assert!(!matches_prod_filter(&staged, ON_PROD));
+        assert!(matches_prod_filter(&staged, NOT_ON_PROD));
+
+        for release in [&live, &staged] {
+            assert!(matches_prod_filter(release, ""), "no filter hides nothing");
+            assert!(matches_prod_filter(release, "a-value-from-a-newer-build"));
         }
     }
 
@@ -157,10 +205,16 @@ mod tests {
         assert_eq!(state.service_filter, "rest-api");
         assert_eq!(state.expanded.len(), 1);
 
+        state.set_prod_filter(ON_PROD.to_string());
+
         state.select("TM".to_string());
         assert_eq!(state.selected, "TM");
         assert!(state.service_filter.is_empty());
         assert!(state.expanded.is_empty());
+        assert_eq!(
+            state.prod_filter, ON_PROD,
+            "\"what is live\" is how the reader wants releases shown, on any board"
+        );
     }
 
     #[test]

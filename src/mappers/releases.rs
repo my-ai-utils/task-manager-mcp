@@ -2,10 +2,10 @@ use rust_extensions::date_time::DateTimeAsMicroseconds;
 use task_manager_shared::releases::{ReleaseGoalResponse, ReleaseResponse, ServiceReleaseResponse};
 
 use crate::board::{
-    BoardInner, ProjectModel, ReleaseModel, ServiceReleaseModel, compose_goal_handle,
+    BoardInner, CommentModel, ProjectModel, ReleaseModel, ServiceReleaseModel, compose_goal_handle,
     compose_release_handle,
 };
-use crate::postgres::{ReleaseDto, ServiceReleaseJsonModel};
+use crate::postgres::{ReleaseCommentJsonModel, ReleaseDto, ServiceReleaseJsonModel};
 
 impl From<&ReleaseDto> for ReleaseModel {
     fn from(src: &ReleaseDto) -> Self {
@@ -17,6 +17,8 @@ impl From<&ReleaseDto> for ReleaseModel {
             release_notes: src.release_notes.clone(),
             date: src.release_date,
             services: src.services.iter().map(|itm| itm.into()).collect(),
+            released_on_prod_moment: src.released_on_prod_moment,
+            comments: src.comments.iter().map(|itm| itm.into()).collect(),
             created: src.created,
             updated: src.updated,
             deleted_moment: src.deleted_moment,
@@ -34,9 +36,31 @@ impl From<&ReleaseModel> for ReleaseDto {
             release_notes: src.release_notes.clone(),
             release_date: src.date,
             services: src.services.iter().map(|itm| itm.into()).collect(),
+            comments: src.comments.iter().map(|itm| itm.into()).collect(),
+            released_on_prod_moment: src.released_on_prod_moment,
             created: src.created,
             updated: src.updated,
             deleted_moment: src.deleted_moment,
+        }
+    }
+}
+
+impl From<&ReleaseCommentJsonModel> for CommentModel {
+    fn from(src: &ReleaseCommentJsonModel) -> Self {
+        Self {
+            moment: DateTimeAsMicroseconds::new(src.moment_unix_seconds * 1_000_000),
+            who: src.who.clone(),
+            text: src.text.clone(),
+        }
+    }
+}
+
+impl From<&CommentModel> for ReleaseCommentJsonModel {
+    fn from(src: &CommentModel) -> Self {
+        Self {
+            moment_unix_seconds: src.moment.unix_microseconds / 1_000_000,
+            who: src.who.clone(),
+            text: src.text.clone(),
         }
     }
 }
@@ -104,6 +128,18 @@ pub fn release_to_response(
                 id: compose_goal_handle(&project.prefix, goal.number),
                 name: goal.name.clone(),
                 color: rust_extensions::AsStr::as_str(&goal.color).to_string(),
+            })
+            .collect(),
+        released_on_prod_unix_seconds: src
+            .released_on_prod_moment
+            .map(|itm| itm.unix_microseconds / 1_000_000),
+        comments: src
+            .comments
+            .iter()
+            .map(|itm| task_manager_shared::tasks::TaskCommentResponse {
+                moment_unix_seconds: itm.moment.unix_microseconds / 1_000_000,
+                who: itm.who.clone(),
+                text: itm.text.clone(),
             })
             .collect(),
         created_unix_seconds: src.created.unix_microseconds / 1_000_000,

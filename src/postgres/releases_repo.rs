@@ -34,6 +34,18 @@ pub struct ServiceReleaseJsonModel {
     pub description: String,
 }
 
+// One comment on a release's thread, inside the release row's `comments` jsonb.
+//
+// Its own type rather than a reuse of the task's or the goal's, as those two are kept apart from each
+// other: the three threads are the same shape today and have no reason to move together tomorrow, and a
+// shared jsonb model would make a change to one silently rewrite the others' rows.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct ReleaseCommentJsonModel {
+    pub moment_unix_seconds: i64,
+    pub who: String,
+    pub text: String,
+}
+
 // A release — the record that a feature went out, and in what.
 //
 // The primary key is `(project_id, number)`, exactly as a task's and a goal's is, and for the same reason
@@ -61,6 +73,16 @@ pub struct ReleaseDto {
     #[sql_type("jsonb")]
     #[json]
     pub services: Vec<ServiceReleaseJsonModel>,
+    // The thread. NOT NULL, unlike the jsonb columns that were added to `goals` and `tasks` after they had
+    // rows: this column is as old as its table, so there was never a populated table to add it to.
+    #[sql_type("jsonb")]
+    #[json]
+    pub comments: Vec<ReleaseCommentJsonModel>,
+    // When the release was marked as out on production; NULL while it is not. A moment rather than a
+    // flag for the reason `deleted_moment` is: "on prod" and "since when" are one fact, and two columns
+    // for it could disagree.
+    #[sql_type("timestamp")]
+    pub released_on_prod_moment: Option<DateTimeAsMicroseconds>,
     #[sql_type("timestamp")]
     pub created: DateTimeAsMicroseconds,
     #[sql_type("timestamp")]

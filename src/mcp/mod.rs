@@ -42,7 +42,8 @@ use goals_tool_calls::{
 use labels_list_tool_call::LabelsListHandler;
 use projects_list_tool_call::ProjectsListHandler;
 use releases_tool_calls::{
-    ReleasesCreateHandler, ReleasesDeleteHandler, ReleasesListHandler, ReleasesUpdateHandler,
+    ReleasesAddCommentHandler, ReleasesCreateHandler, ReleasesDeleteHandler,
+    ReleasesGetCommentsHandler, ReleasesListHandler, ReleasesUpdateHandler,
 };
 use resolve_id_tool_call::ResolveIdHandler;
 use tasks_list_tool_call::TasksListHandler;
@@ -322,9 +323,23 @@ before deploying a recorded version anywhere, and write it in the same call that
 A release names a microservice ONCE: passing one it already has to releases_update corrects that entry \
 rather than adding a second.\
 \
-A RELEASE IS NOT DELETED FOR BEING ROLLED BACK. It happened; say what became of it in its \
-`description`. releases_delete is for one recorded by mistake, and like every deletion here it is a \
-flag — `deleted: false` on releases_update brings it back, onto the goals that listed it too.\
+REACHING PRODUCTION IS A MARK ON A RELEASE, NOT A SECOND RELEASE. A release is recorded when it ships \
+somewhere — usually a test stand first — so the list of releases is everything that went out, not \
+everything that is live. When the same versions are rolled out to production, mark the release with \
+`released_on_prod: true` on releases_update; do not record them again. Every release reports \
+`released_on_prod`, and releases_list filters by it — which, together with `microservice_id`, is how \
+'which version of this service is on prod' is answered in one row. Mark it when it has HAPPENED, and take \
+the mark off with `false` if the release is pulled back from production.\
+\
+A RELEASE HAS A THREAD, AND IT IS FOR WHAT HAPPENED. `release_notes` say what changed; \
+releases_add_comment is where the rollout itself is written down — it went clean, a setting was missed \
+and added by hand, it was pulled back and why. `comment` on releases_update does the same in the call \
+that marks it. A comment does not move the release's `updated`.\
+\
+A RELEASE IS NOT DELETED FOR BEING ROLLED BACK. It happened; take the production mark off if it had \
+one, and say what became of it on its thread. releases_delete is for one recorded by mistake, and like \
+every deletion here it is a flag — `deleted: false` on releases_update brings it back, onto the goals \
+that listed it too.\
 \
 MOVING A TASK TO `done` REQUIRES A COMMENT, AND THE MOVE IS REFUSED WITHOUT ONE. Pass `comment` and \
 `comment_by` to tasks_update in the same call as the status change. Say what was actually done — what \
@@ -463,6 +478,9 @@ pub fn build_middleware(app: Arc<AppContext>) -> McpMiddleware {
     mcp.register_tool_call(Arc::new(GoalsAddCommentHandler::new(app.clone())));
     mcp.register_tool_call(Arc::new(GoalsGetCommentsHandler::new(app.clone())));
 
+    mcp.register_tool_call(Arc::new(ReleasesAddCommentHandler::new(app.clone())));
+    mcp.register_tool_call(Arc::new(ReleasesGetCommentsHandler::new(app.clone())));
+
     mcp.register_tool_call(Arc::new(AddCommentHandler::new(app.clone())));
     mcp.register_tool_call(Arc::new(GetCommentsHandler::new(app)));
 
@@ -526,6 +544,8 @@ mod tests {
                 "git_hash",
                 "datetime",
                 "settings_update_note",
+                // The production mark is on both tools: almost never on the first, usually on the second.
+                "released_on_prod",
             ] {
                 assert!(
                     schema.contains(expected),

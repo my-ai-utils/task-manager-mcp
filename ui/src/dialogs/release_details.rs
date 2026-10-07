@@ -24,6 +24,15 @@ pub fn ReleaseDetails(release: ReleaseResponse) -> Element {
 
     rsx! {
         div { class: "release-details",
+            // Said in words where the folded row says it with a badge, and with the moment: "on prod"
+            // is the question, "since when" is the next one. Nothing when it is not there yet — every
+            // release starts that way, and a line saying so on each would be a line nobody reads.
+            if let Some(since) = release.released_on_prod_unix_seconds {
+                div { class: "release-on-prod",
+                    "On production since {moment_for_display(since)}"
+                }
+            }
+
             if has_description {
                 div { class: "release-text md", dangerous_inner_html: "{description_html}" }
             }
@@ -92,6 +101,45 @@ pub fn ReleaseDetails(release: ReleaseResponse) -> Element {
                 div { class: "release-note-label", "Release notes" }
                 div { class: "release-text md", dangerous_inner_html: "{notes_html}" }
             }
+
+            // Last, as on a task and a goal: the notes above say what changed, and this is what was said
+            // about the rollout itself. Nothing at all when nobody has said anything — most releases go
+            // out without comment, and an empty heading on each would read as something missing.
+            if !release.comments.is_empty() {
+                div { class: "release-thread",
+                    div { class: "task-view-thread-header",
+                        "Comments"
+                        span { class: "board-column-count", "{release.comments.len()}" }
+                    }
+                    for (index , comment) in release.comments.iter().enumerate() {
+                        div { class: "task-view-comment", key: "{index}",
+                            div { class: "task-view-comment-who", "{comment.who}" }
+                            div { class: "md", dangerous_inner_html: "{super::md_to_html(&comment.text)}" }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The mark on a release that is out on production.
+///
+/// Beside the settings flag and deliberately unlike it: that one is amber because it asks somebody to do
+/// something, this one is the green the board already uses for `Done`, because it says something has
+/// been done. Nothing when the release has not reached production — which is every release at first, so
+/// its absence is the ordinary state and not a warning.
+#[component]
+pub fn ReleaseProdFlag(release: ReleaseResponse) -> Element {
+    let Some(since) = release.released_on_prod_unix_seconds else {
+        return rsx! {};
+    };
+
+    rsx! {
+        span {
+            class: "release-prod-flag",
+            title: "Out on production since {moment_for_display(since)}",
+            "Prod"
         }
     }
 }

@@ -3,8 +3,8 @@ use service_sdk::my_telemetry::MyTelemetryContext;
 
 use crate::app::AppContext;
 use crate::board::{
-    BoardInner, ProjectModel, ReleaseModel, ServiceReleaseModel, compose_release_handle,
-    parse_release_handle,
+    BoardInner, CommentModel, ProjectModel, ReleaseModel, ServiceReleaseModel,
+    compose_release_handle, parse_release_handle,
 };
 use crate::postgres::{GoalDto, ReleaseDto};
 
@@ -261,6 +261,9 @@ pub struct NewRelease {
     /// The goal this release ships, by handle or bare number — attached in the same call, so recording a
     /// release and saying what it was for cannot be done as two steps of which the second is forgotten.
     pub goal: Option<String>,
+    /// Whether it is out on production already. Almost always `false` when a release is first written
+    /// down — it goes to a test stand first, and the mark is put on later with `ReleasePatch`.
+    pub released_on_prod: bool,
 }
 
 /// A change to a release. Every field is optional; `None` means "leave it alone".
@@ -271,9 +274,16 @@ pub struct ReleasePatch {
     pub release_notes: Option<String>,
     pub date: Option<String>,
     pub services: ServicesPatch,
+    /// `Some(true)` marks the release as out on production, `Some(false)` takes the mark off, `None`
+    /// leaves it alone — see [`mark_on_prod`].
+    pub released_on_prod: Option<bool>,
     /// `Some(false)` brings a deleted release back. `Some(true)` deletes it, which `delete_release` also
     /// does — both are here for the reason they are both on a goal's patch.
     pub deleted: Option<bool>,
+    /// A note for the release's thread as part of this same change — how the rollout went, usually, in
+    /// the call that marks it as on production.
+    pub comment: Option<String>,
+    pub comment_by: Option<String>,
 }
 
 impl ReleasePatch {
@@ -285,8 +295,65 @@ impl ReleasePatch {
             && self.release_notes.is_none()
             && self.date.is_none()
             && self.services.is_empty()
+            && self.released_on_prod.is_none()
             && self.deleted.is_none()
+            && self.trimmed_comment().is_none()
     }
+
+    /// The comment, if there is anything to it. Whitespace is not a comment.
+    pub fn trimmed_comment(&self) -> Option<&str> {
+        self.comment
+            .as_deref()
+            .map(str::trim)
+            .filter(|itm| !itm.is_empty())
+    }
+}
+
+/// The production mark after a change to it.
+///
+/// **Stamped once and cleared whole**, the way a deletion is. Marking a release that is already on
+/// production must not move the moment — that is when it got there, and a second call saying the same
+/// thing is not a second rollout. Taking the mark off leaves nothing behind, so a release pulled back from
+/// production stops answering to "what is on prod" at once, and putting it back later is dated by when it
+/// went back.
+///
+/// Its own function because it is the whole of the rule and has no need of an `AppContext` to be tested.
+fn mark_on_prod(
+    current: Option<DateTimeAsMicroseconds>,
+    wanted: Option<bool>,
+    now: DateTimeAsMicroseconds,
+) -> Option<DateTimeAsMicroseconds> {
+    match wanted {
+        Some(true) => current.or(Some(now)),
+        Some(false) => None,
+        None => current,
+    }
+}
+
+/// A comment for a release's thread, or a refusal.
+///
+/// The author is demanded for the reason a goal's thread demands one: MCP has no session to derive it
+/// from, and a thread of anonymous notes about a rollout answers none of the questions it is read for.
+fn build_release_comment(
+    comment: Option<&str>,
+    comment_by: Option<&str>,
+) -> Result<Option<CommentModel>, String> {
+    let Some(comment) = comment else {
+        return Ok(None);
+    };
+
+    let who = comment_by
+        .map(str::trim)
+        .filter(|itm| !itm.is_empty())
+        .ok_or_else(|| {
+            "a comment needs an author — pass `comment_by` as an email, or `AI`".to_string()
+        })?;
+
+    Ok(Some(CommentModel {
+        moment: DateTimeAsMicroseconds::now(),
+        who: super::normalise_actor(who),
+        text: comment.to_string(),
+    }))
 }
 
 /// Which release a caller named, as a number within one project — WITHOUT checking that it exists.
@@ -438,6 +505,8 @@ pub async fn create_release(app: &AppContext, new_release: NewRelease) -> Result
         release_notes: new_release.release_notes.trim().to_string(),
         date,
         services,
+        released_on_prod_moment: mark_on_prod(None, Some(new_release.released_on_prod), now),
+        comments: Vec::new(),
         created: now,
         updated: now,
         deleted_moment: None,
@@ -500,7 +569,7 @@ pub async fn update_release(
 ) -> Result<String, String> {
     if patch.is_empty() {
         return Err(
-            "nothing to update: pass at least one of title, description, release_notes, date, a service to add or remove, or deleted"
+            "nothing to update: pass at least one of title, description, release_notes, date, a service to add or remove, released_on_prod, deleted or comment"
                 .to_string(),
         );
     }
@@ -531,6 +600,17 @@ pub async fn update_release(
     // On the clone, like every other field here: one service that does not validate refuses the whole
     // call rather than half of it.
     patch.services.apply(&mut release.services, now)?;
+
+    // Built before anything is written back, so a note with no author refuses the whole call — including
+    // the mark it came with.
+    let comment = build_release_comment(patch.trimmed_comment(), patch.comment_by.as_deref())?;
+
+    if let Some(comment) = comment {
+        release.comments.push(comment);
+    }
+
+    release.released_on_prod_moment =
+        mark_on_prod(release.released_on_prod_moment, patch.released_on_prod, now);
 
     // Stamped once and cleared whole, exactly as on a task and a goal.
     match patch.deleted {
@@ -577,6 +657,46 @@ pub async fn delete_release(app: &AppContext, handle: &str) -> Result<String, St
         release.deleted_moment = Some(now);
         release.updated = now;
     }
+
+    let ctx = MyTelemetryContext::create_empty();
+    let dto: ReleaseDto = (&release).into();
+    app.releases_repo.upsert(&dto, &ctx).await;
+
+    let handle = compose_release_handle(&project.prefix, release.number);
+    app.board.upsert_release(release);
+    app.notify_project_changed(&project.id).await;
+
+    Ok(handle)
+}
+
+/// Append a comment to a release's thread.
+///
+/// Does **not** move the release's `updated`, for the reason a task's thread and a goal's do not move
+/// theirs: what was said about a rollout is a separate record from what was rolled out.
+pub async fn add_release_comment(
+    app: &AppContext,
+    handle: &str,
+    who: &str,
+    text: &str,
+) -> Result<String, String> {
+    if who.trim().is_empty() {
+        return Err("a comment needs an author — an email, or `AI`".to_string());
+    }
+
+    if text.trim().is_empty() {
+        return Err("a comment needs some text".to_string());
+    }
+
+    let board = app.board.read();
+    let resolved = resolve_release_by_handle(&board, handle)?;
+    let project = resolved.project;
+    let mut release = resolved.release.as_ref().clone();
+
+    release.comments.push(CommentModel {
+        moment: DateTimeAsMicroseconds::now(),
+        who: super::normalise_actor(who.trim()),
+        text: text.trim().to_string(),
+    });
 
     let ctx = MyTelemetryContext::create_empty();
     let dto: ReleaseDto = (&release).into();
@@ -800,13 +920,70 @@ mod tests {
         assert_eq!(validate_title("  Releases  ").unwrap(), "Releases");
     }
 
+    /// The moment is when the release GOT to production. Saying so twice is not a second rollout, and
+    /// taking the mark off has to leave nothing behind — a release pulled back must stop answering to
+    /// "what is on prod", and one put back is dated by when it went back.
+    #[test]
+    fn the_prod_mark_is_stamped_once_and_cleared_whole() {
+        assert_eq!(mark_on_prod(None, None, now(100)), None);
+        assert_eq!(mark_on_prod(None, Some(false), now(100)), None);
+
+        let marked = mark_on_prod(None, Some(true), now(100));
+        assert_eq!(marked, Some(now(100)));
+
+        assert_eq!(
+            mark_on_prod(marked, Some(true), now(500)),
+            Some(now(100)),
+            "marking it again must not move when it got there"
+        );
+        assert_eq!(mark_on_prod(marked, None, now(500)), Some(now(100)));
+
+        let pulled_back = mark_on_prod(marked, Some(false), now(600));
+        assert_eq!(pulled_back, None);
+        assert_eq!(mark_on_prod(pulled_back, Some(true), now(700)), Some(now(700)));
+    }
+
+    /// Text without an author is refused, as on a goal: a thread about a rollout is read to find out who
+    /// saw what, and an anonymous line in it answers neither.
+    #[test]
+    fn a_release_comment_without_an_author_is_refused() {
+        assert!(build_release_comment(None, None).unwrap().is_none());
+        assert!(build_release_comment(Some("rolled out, no errors"), None).is_err());
+        assert!(build_release_comment(Some("rolled out, no errors"), Some("  ")).is_err());
+
+        let comment = build_release_comment(Some("rolled out, no errors"), Some("ai"))
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(comment.who, "AI", "the reserved author is spelled one way");
+        assert_eq!(comment.text, "rolled out, no errors");
+    }
+
     #[test]
     fn an_empty_patch_is_recognised() {
         assert!(ReleasePatch::default().is_empty());
 
+        assert!(
+            ReleasePatch {
+                comment: Some("   ".to_string()),
+                ..Default::default()
+            }
+            .is_empty(),
+            "whitespace is not a comment, so it is not a change either"
+        );
+
         for patch in [
             ReleasePatch {
                 deleted: Some(false),
+                ..Default::default()
+            },
+            // Taking the mark OFF is a change too: `Some(false)` must not be read as "nothing passed".
+            ReleasePatch {
+                released_on_prod: Some(false),
+                ..Default::default()
+            },
+            ReleasePatch {
+                comment: Some("rolled out".to_string()),
                 ..Default::default()
             },
             ReleasePatch {
@@ -854,6 +1031,8 @@ mod tests {
             release_notes: String::new(),
             date: now(number),
             services: Vec::new(),
+            released_on_prod_moment: None,
+            comments: Vec::new(),
             created: now(0),
             updated: now(0),
             deleted_moment: deleted.then(|| now(1)),

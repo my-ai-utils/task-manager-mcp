@@ -259,12 +259,14 @@ pub struct CommentsFile {
     pub comments: Vec<CommentFileModel>,
 }
 
-/// One comment, on a task or on a goal.
+/// One comment, on a task, on a goal or on a release.
 ///
 /// **Its own file rather than a list inside each task**, which is what makes the export readable as a
 /// conversation: `comments.yaml` is the whole thread of the project in one place, in the order it happened,
 /// and it is the file somebody actually wants to read. `on` says what it is attached to, as a handle — and
-/// since one counter serves tasks and goals, `RMS-42` and `RMS-G7` are unambiguous about which kind it is.
+/// since one counter serves all three kinds, `RMS-42`, `RMS-G7` and `RMS-R12` are unambiguous about which
+/// one it is. A release's thread is in here with the rest for that reason: how a rollout went is part of
+/// the same conversation as the work that led to it.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct CommentFileModel {
     #[serde(rename = "on")]
@@ -313,6 +315,11 @@ pub struct ReleaseFileModel {
     pub date: String,
     #[serde(default)]
     pub services: Vec<ServiceReleaseFileModel>,
+    // When it was marked as out on production, and absent while it is not. The MOMENT travels rather than
+    // a yes or no, because that is what the board holds: a release that reached production in March must
+    // not arrive saying it got there on the day of the import.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub released_on_prod: Option<String>,
     pub created: String,
     pub updated: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

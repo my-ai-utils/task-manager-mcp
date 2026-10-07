@@ -156,7 +156,7 @@ async fn build(
     releases: &[ReleaseModel],
     documents: &[crate::documents::DocumentIndexEntry],
 ) -> Result<u64, String> {
-    let comments = comments_file(project, goals, tasks);
+    let comments = comments_file(project, goals, tasks, releases);
 
     let project_file = ProjectFile {
         format: FORMAT.to_string(),
@@ -337,8 +337,28 @@ fn write_yaml<TWrite: std::io::Write + std::io::Seek, TModel: serde::Serialize>(
 /// order it happened, which is the file somebody actually opens. Sorted by moment, with the handle as the
 /// tiebreaker so two comments stamped in the same microsecond come out in the same order every time — an
 /// export that reshuffles between two runs would diff as a change that did not happen.
-fn comments_file(project: &ProjectModel, goals: &[GoalModel], tasks: &[TaskModel]) -> CommentsFile {
+// `pub(super)` for the import's round-trip test of a release's thread, for the reason `goal_to_file`
+// below is: the test has to start from what THIS writes.
+pub(super) fn comments_file(
+    project: &ProjectModel,
+    goals: &[GoalModel],
+    tasks: &[TaskModel],
+    releases: &[ReleaseModel],
+) -> CommentsFile {
     let mut comments: Vec<CommentFileModel> = Vec::new();
+
+    for release in releases {
+        let handle = compose_release_handle(&project.prefix, release.number);
+
+        for comment in &release.comments {
+            comments.push(CommentFileModel {
+                target: handle.clone(),
+                moment: encode_moment(comment.moment),
+                who: comment.who.clone(),
+                text_base64: encode_text(&comment.text),
+            });
+        }
+    }
 
     for goal in goals {
         let handle = compose_goal_handle(&project.prefix, goal.number);
@@ -459,6 +479,7 @@ pub(super) fn release_to_file(project: &ProjectModel, release: &ReleaseModel) ->
                 description_base64: encode_text(&itm.description),
             })
             .collect(),
+        released_on_prod: release.released_on_prod_moment.map(encode_moment),
         created: encode_moment(release.created),
         updated: encode_moment(release.updated),
         deleted: release.deleted_moment.map(encode_moment),

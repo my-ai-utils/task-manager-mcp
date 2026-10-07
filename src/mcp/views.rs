@@ -301,9 +301,23 @@ pub struct ReleaseView {
         description = "Ids of the goals that list this release — normally exactly one, the feature it shipped. Derived, not stored on the release: a goal says which releases it went out in. Empty means nobody has attached it to a goal yet"
     )]
     pub goals: Vec<String>,
+    #[property(
+        description = "TRUE ONCE THIS RELEASE IS OUT ON PRODUCTION. A release is recorded when it ships somewhere — usually a test stand first — so false does not mean it is nowhere, it means it has not reached prod. This is the field that answers 'is it live for users', and what `released_on_prod` on releases_list filters by. Set it with releases_update when the rollout to production has actually happened, not when it is planned"
+    )]
+    pub released_on_prod: bool,
+    #[property(
+        description = "When it was marked as on production, unix seconds (UTC); absent while it is not. Stamped by the server at the moment of the mark, so it is when somebody SAID it reached prod. Cleared when the mark is taken off"
+    )]
+    pub released_on_prod_unix_seconds: Option<i64>,
+    #[property(
+        description = "How many notes are on the release's thread — how the rollout went, what was noticed afterwards, why it was pulled back. Read them with releases_get_comments. The notes say what changed; the thread says what happened"
+    )]
+    pub comments_amount: i32,
     #[property(description = "When the release was written down, unix seconds (UTC)")]
     pub created_unix_seconds: i64,
-    #[property(description = "When the record last changed, unix seconds (UTC)")]
+    #[property(
+        description = "When the record itself last changed, unix seconds (UTC). A comment does not move this"
+    )]
     pub updated_unix_seconds: i64,
     #[property(
         description = "When it was DELETED, unix seconds (UTC), and absent for a release that is not. A deleted release is gone from every list and from every goal that listed it, and is still reachable by its id — which is the only way you are seeing this field. releases_update with `deleted: false` brings it back, onto those goals too"
@@ -337,6 +351,11 @@ impl ReleaseView {
                 .iter()
                 .map(|goal| crate::board::compose_goal_handle(&project.prefix, goal.number))
                 .collect(),
+            released_on_prod: release.is_released_on_prod(),
+            released_on_prod_unix_seconds: release
+                .released_on_prod_moment
+                .map(|itm| itm.unix_microseconds / 1_000_000),
+            comments_amount: release.comments.len() as i32,
             created_unix_seconds: release.created.unix_microseconds / 1_000_000,
             updated_unix_seconds: release.updated.unix_microseconds / 1_000_000,
             deleted_unix_seconds: release

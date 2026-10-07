@@ -403,6 +403,25 @@ not a line in the notes, the folded row on the Releases screen carries a flag wh
 and the open release draws it as a block of its own under that service. Everything else goes in
 `description`.
 
+**Reaching production is a mark on the release, not a second release.** A release is written down when
+it ships *somewhere* — usually a test stand first — so the list of releases is everything that went out,
+not everything that is live. When the same versions of the same services are rolled out to production the
+release is marked, `released_on_prod`, and that mark is what "what is actually on prod" is filtered by:
+`releases_list` takes it, and so does the Releases screen. With a microservice picked beside it, the top
+row is the version of that service users are on. It is stored as a **moment** and not a bool —
+`released_on_prod_moment`, the way `close_moment` and `deleted_moment` are — because "is it on prod" and
+"since when" are one fact and two columns for it could disagree; the surfaces report both, derived from
+the one. It is stamped when the mark is put on, **kept** if it is put on again — that is when the release
+got there, and saying so twice is not a second rollout — and cleared whole when it is taken off, so a
+release pulled back from production stops answering to "what is live" at once.
+
+**A release has a thread, and it is for what happened.** `release_notes` say what *changed*; the thread
+says how the rollout went — clean, a setting missed and added by hand, pulled back and why. It is the
+same shape as a task's and a goal's and rides on the release row as `jsonb` for the same reason: one
+atomic write per comment. `releases_add_comment` writes one, `comment` on `releases_update` writes one in
+the same call that marks the release, and neither moves the release's `updated`. An author is demanded,
+as on a goal: MCP has no session to take one from.
+
 **`git_hash` has to be a hash.** 7 to 64 hex characters, lower-cased on the way in; a branch or a tag is
 refused. A version is not held to anything, and the difference is deliberate: the commit is the half of
 the entry that cannot have moved since. `main` or `v1.2.3` stored here would be a record that reads as
@@ -442,11 +461,13 @@ nobody has attached yet, which is a legitimate state and visible on the Releases
 would leave a goal pointing at a number that names nothing.
 
 In the browser there is a **Releases** tab: one row per release, newest first, folded to its id, title,
-the goal it shipped (in that goal's colour), up to three `service version` chips, a settings flag when one
-is due, and the date; a click opens the services table and the notes. A filter narrows the list to one
-microservice, which puts the version of it that is out at the top. A goal's dialog shows the releases it
-went out in under its text, open, and a goal that has shipped carries a `🚀` count on the Goals screen.
-All of it read-only — a release is recorded through `/mcp`.
+the id of the goal it shipped (in that goal's colour), a green `Prod` badge once it is on production, a
+settings flag when one is due, up to three `service version` chips, a count of the notes on its thread,
+and the date; a click opens the goal's name, the services table, the notes and the thread. Two filters
+narrow the list — to one microservice, and to what is or is not on production — and together they put
+the version of a service that is live at the top. A goal's dialog shows the releases it went out in under
+its text, open, and a goal that has shipped carries a `🚀` count on the Goals screen. All of it read-only
+— a release is recorded, marked and commented through `/mcp`.
 
 ## Searching the board
 
@@ -1124,7 +1145,7 @@ each is readable on its own and a diff between two exports says which of them ch
 project.yaml     the project's settings, plus what the archive holds
 goals.yaml       every goal, each listing the releases it went out in
 tasks.yaml       every task
-comments.yaml    every comment, on tasks and goals alike, oldest first
+comments.yaml    every comment — on tasks, goals and releases alike — oldest first
 releases.yaml    every release, with the services in it
 documents.yaml   what each of those files is: its ID, its path, its declared content type
 documents/       the project's documents, as themselves, at their own paths
@@ -1159,7 +1180,9 @@ is not worth losing it over.
 
 A release is renumbered the same way and out of the same reservation, since the receiving board serves
 tasks, goals and releases from one counter exactly as the source did — and a goal's `releases: [TM-R12]` is
-remapped onto the new numbers. A **deleted** release is carried too, still listed by its goals: a goal goes
+remapped onto the new numbers. Its thread is in `comments.yaml` with every other, named by its handle, and
+its production mark crosses as the moment it was: a release that went live in March does not arrive
+saying it did so on the day of the import. A **deleted** release is carried too, still listed by its goals: a goal goes
 on listing a release that has been deleted so that bringing it back puts it on the goal again, and that only
 holds on the other board if the release is there to bring back.
 
@@ -1480,8 +1503,12 @@ Tools:
   which version of which microservice. `releases_create` takes the `goal` the release ships and attaches
   it in the same call; a release recorded without one is attached later with `add_releases` on
   `goals_update`, which is also where one is detached — the goal lists its releases, so the link is the
-  goal's to change. `releases_list` filters by `goal` or by `microservice_id`, newest first, and is capped
-  by `limit` because nothing ages off it. See [Releases](#releases--the-record-of-what-went-out).
+  goal's to change. `releases_list` filters by `goal`, by `microservice_id` and by `released_on_prod`,
+  newest first, and is capped by `limit` because nothing ages off it. `released_on_prod` on
+  `releases_update` is how a release is marked as out on production — a mark, not a second release. See
+  [Releases](#releases--the-record-of-what-went-out).
+- `releases_add_comment` / `releases_get_comments` — the release's thread: how the rollout went, as
+  opposed to its notes, which say what changed.
 - `tasks_search` — the board and its threads, by what was written on them. The counterpart to
   `tasks_list`: that one answers "what is in this column", this one answers "where did we discuss
   this". **It is the only way to see inside a comment thread without already knowing which card to

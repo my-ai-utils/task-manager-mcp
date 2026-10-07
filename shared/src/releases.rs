@@ -1,6 +1,8 @@
 use my_http_utils::macros::{MyHttpInput, MyHttpObjectStructure};
 use serde::{Deserialize, Serialize};
 
+use crate::tasks::TaskCommentResponse;
+
 // Never put `///` doc comments on fields of a struct deriving MyHttpInput or
 // MyHttpObjectStructure: the macro's attribute parser panics with `Somehow we got Punct here: =`.
 
@@ -67,6 +69,16 @@ pub struct ReleaseResponse {
     pub services: Vec<ServiceReleaseResponse>,
     #[serde(default)]
     pub goals: Vec<ReleaseGoalResponse>,
+    // When this release was marked as out on PRODUCTION, and absent while it is not. A release is written
+    // down when it ships somewhere — usually a test stand first — and reaching production is a later mark
+    // on the same release. One field for both "is it on prod" and "since when", so the two cannot
+    // disagree: read the first with `is_released_on_prod`.
+    #[serde(default)]
+    pub released_on_prod_unix_seconds: Option<i64>,
+    // The release's thread, oldest first — what was said about the rollout, as opposed to `release_notes`,
+    // which say what changed. The same shape a task's and a goal's thread travel in.
+    #[serde(default)]
+    pub comments: Vec<TaskCommentResponse>,
     pub created_unix_seconds: i64,
     pub updated_unix_seconds: i64,
     // When it was deleted, and absent for a release that is not — see `TaskResponse::deleted_unix_seconds`.
@@ -82,6 +94,15 @@ pub struct ReleasesResponse {
 pub struct GetReleasesInputModel {
     #[http_body(name: "project", description: "Which project's releases to read, by prefix — RMS")]
     pub project: String,
+}
+
+/// Whether a release has gone out to production.
+///
+/// A function over the one field rather than a second field beside it: a bool on the wire next to the
+/// moment would be two statements of one fact, and the first build to set one and forget the other would
+/// draw a release that is and is not on prod.
+pub fn is_released_on_prod(release: &ReleaseResponse) -> bool {
+    release.released_on_prod_unix_seconds.is_some()
 }
 
 /// Whether any service in a release changes its settings.
@@ -165,10 +186,31 @@ mod tests {
             date_unix_seconds: 0,
             services,
             goals: Vec::new(),
+            released_on_prod_unix_seconds: None,
+            comments: Vec::new(),
             created_unix_seconds: 0,
             updated_unix_seconds: 0,
             deleted_unix_seconds: None,
         }
+    }
+
+    /// A release recorded by a build that did not know about production or about threads has neither
+    /// field on the wire, and has to read as what it was: not on prod, with nothing said about it.
+    #[test]
+    fn a_release_without_the_newer_fields_reads_as_not_on_prod_and_unremarked() {
+        let raw = r#"{"id":"RMS-R1","project":"RMS","title":"t","description":"","release_notes":"",
+            "date_unix_seconds":0,"created_unix_seconds":0,"updated_unix_seconds":0,
+            "deleted_unix_seconds":null}"#;
+
+        let read: ReleaseResponse = serde_json::from_str(raw).unwrap();
+
+        assert!(!is_released_on_prod(&read));
+        assert!(read.comments.is_empty());
+
+        let mut on_prod = release(Vec::new());
+        on_prod.released_on_prod_unix_seconds = Some(MIDNIGHT);
+
+        assert!(is_released_on_prod(&on_prod));
     }
 
     /// Whitespace is not a note: a release whose services all say nothing must not be flagged, or the flag

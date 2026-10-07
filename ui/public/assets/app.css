@@ -2541,11 +2541,12 @@ button.task-view-check-row:hover {
   min-width: 0;
 }
 
-.release-goal-name {
-  max-width: 180px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+/* The goals of an open release, named in full: the folded row has room for the id only. */
+.release-goals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 14px;
+  margin-bottom: 12px;
 }
 
 /* A service and the version of it that went out, as one chip in two halves: the name muted and the
@@ -2595,6 +2596,39 @@ button.task-view-check-row:hover {
   padding: 1px 7px;
   white-space: nowrap;
   flex-shrink: 0;
+}
+
+/* Out on production. The green this stylesheet already uses for `Done` — `#1a7f37`, the repeated literal,
+   see `.goal-status.done` — because it is the same statement about a release that `Done` is about a
+   goal: this got where it was going. Filled, where the status pill beside a goal is outlined: on a row of
+   muted chips it is the one fact the list is most often scanned for. */
+.release-prod-flag {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #ffffff;
+  background: #1a7f37;
+  border-radius: 10px;
+  padding: 1px 8px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* The same fact in words, at the top of an open release. */
+.release-on-prod {
+  font-size: 12px;
+  color: #1a7f37;
+  font-weight: 600;
+}
+
+/* The thread under an open release. The comments themselves are drawn with the dialogs' own classes —
+   they are the same thing as a comment on a task — and this only spaces them as a list. */
+.release-thread {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 /* Tabular figures and a fixed minimum, so a column of dates lines up down the list and can be read as a

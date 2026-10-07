@@ -139,6 +139,9 @@ fn release(project_id: &str, number: i64, day: i64) -> ReleaseModel {
         release_notes: String::new(),
         date: DateTimeAsMicroseconds::new(day * 24 * 60 * 60 * 1_000_000),
         services: Vec::new(),
+        // Not on production and nothing said about it: neither is something the board derives from.
+        released_on_prod_moment: None,
+        comments: Vec::new(),
         created: DateTimeAsMicroseconds::new(0),
         updated: DateTimeAsMicroseconds::new(0),
         deleted_moment: None,

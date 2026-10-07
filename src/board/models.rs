@@ -340,8 +340,9 @@ pub struct ServiceReleaseModel {
 /// list and the notes are on the release: the release says what changed for a reader, each service says
 /// what was deployed.
 ///
-/// There is no state. A release has happened by the time it is written down; the only thing that can
-/// become of it afterwards is being deleted, for one recorded by mistake.
+/// There is no state machine. A release has happened by the time it is written down, and two things can
+/// become of it afterwards: it reaches production, which is a mark on it rather than a second release —
+/// see `released_on_prod_moment` — or it is deleted, for one recorded by mistake.
 #[derive(Debug, Clone)]
 pub struct ReleaseModel {
     pub project_id: String,
@@ -359,7 +360,23 @@ pub struct ReleaseModel {
     pub date: DateTimeAsMicroseconds,
     // In the order they were added, which is normally the order they went out.
     pub services: Vec<ServiceReleaseModel>,
+    // When this release was marked as out on PRODUCTION, and `None` while it is not.
+    //
+    // A release is written down when it ships SOMEWHERE — usually a test stand first — and reaching
+    // production is a later fact about the same versions of the same services. So it is a mark on the
+    // release rather than a second release, and it is what "what is actually on prod" is filtered by.
+    //
+    // A moment and not a bool, the way `close_moment` and `deleted_moment` are: "is it on prod" and
+    // "since when" are one fact, and two fields for it could disagree. Stamped when the mark is put on,
+    // kept if it is put on again, and cleared whole when it is taken off — a release pulled back from
+    // production must not go on reading as there.
+    pub released_on_prod_moment: Option<DateTimeAsMicroseconds>,
+    // What was said about the release: how the rollout went, what was noticed afterwards, why it was
+    // pulled back. The same shape as a goal's thread and a task's, and it rides on the row for the same
+    // reason — one atomic write per comment. The notes above say what CHANGED; this says what HAPPENED.
+    pub comments: Vec<CommentModel>,
     pub created: DateTimeAsMicroseconds,
+    // Moved by a change to the release itself. A comment does NOT move it, as on a task and a goal.
     pub updated: DateTimeAsMicroseconds,
     // When it was deleted, and `None` for one that is not. A flag rather than a removal, for the reason a
     // task's is: an id that comes back as "no such release" is indistinguishable from a typo.
@@ -369,6 +386,11 @@ pub struct ReleaseModel {
 impl ReleaseModel {
     pub fn is_deleted(&self) -> bool {
         self.deleted_moment.is_some()
+    }
+
+    /// Whether it has gone out to production. Derived, so it cannot disagree with the moment.
+    pub fn is_released_on_prod(&self) -> bool {
+        self.released_on_prod_moment.is_some()
     }
 }
 

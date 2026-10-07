@@ -19,6 +19,13 @@ DX_OUT="${SCRIPT_DIR}/target/dx/task-manager-ui/release/web/public"
 
 cd "${SCRIPT_DIR}"
 
+# dx does not empty its own output folder between builds, and the wasm and its glue are named by a hash
+# of their content — so every build ADDS a pair beside the last one's. Copied as it is, `wwwroot/` would
+# carry every client there has ever been: four megabytes more in the repository and in the image per
+# release, none of it referenced by `index.html`. Removed here, so the output is exactly one build.
+echo ">> cleaning ${DX_OUT}"
+rm -rf "${DX_OUT}"
+
 echo ">> dx build --release --web"
 dx build --release --web
 
