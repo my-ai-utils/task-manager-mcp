@@ -559,8 +559,13 @@ listing walk, which reuses the hash it has whenever a file's size and mtime are 
 it whole exactly once.
 
 Briefs travel with a project: `briefs.yaml` in the export carries the ones belonging to the documents in the
-archive, and the import files them before the documents land. Keyed by content, they need no remapping —
-ids are renumbered on import and hashes are not.
+archive, and the import files them before the documents land, so no document is ever on the receiving board
+without the brief it came with. Keyed by content, they need no remapping — ids are renumbered on import and
+hashes are not. **A text this instance has already briefed keeps the brief it has**: an import only adds,
+and since a brief is filed under a hash rather than under a project, copying a board beside its original
+finds every one of them already there — writing them again would only restamp each as rephrased today. One
+that cannot be filed — a hash that is not a hash, a text over the cap — comes back in the import's `skipped`
+with the reason, and so does a `briefs.yaml` that will not parse; neither stops the import.
 
 ### A large document is worked on in pieces
 
@@ -1076,7 +1081,7 @@ so a key on one is only ever there in order to push.
 A board can be poured into another board. Two controls on the projects setup row: **Export** downloads the
 project as a zip, **Import** takes one back.
 
-**The archive is six YAML files and a folder**, and the split is the point — one file per kind of thing, so
+**The archive is six YAML files and a folder — seven once a document has been briefed**, and the split is the point — one file per kind of thing, so
 each is readable on its own and a diff between two exports says which of them changed:
 
 ```
@@ -1087,6 +1092,7 @@ comments.yaml    every comment, on tasks and goals alike, oldest first
 releases.yaml    every release, with the services in it
 documents.yaml   what each of those files is: its ID, its path, its declared content type
 documents/       the project's documents, as themselves, at their own paths
+briefs.yaml      what each briefed document says, by content hash — only when there is one to carry
 ```
 
 `releases.yaml` is a file of its own rather than a list nested in each goal, because that is the shape the

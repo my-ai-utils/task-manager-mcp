@@ -138,7 +138,16 @@ pub async fn import_project(
     let mut skipped: Vec<SkippedImport> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
 
-    // Documents first, because the cards point at them: a reference on a task names a document by the id
+    // The briefs ahead of the documents they describe. They are filed by the hash of a text, so they need
+    // nothing that has not happened yet — and filed first, no document is ever on this board without the
+    // brief it travelled with, however briefly: a listing read halfway through the loop below would
+    // otherwise show every arriving document as one nobody has read.
+    //
+    // **This call was missing from the day the function was written**: `briefs.yaml` went out in every
+    // export and was read by nothing, so a board always arrived with its documents unbriefed.
+    import_briefs(app, &mut archive, who, &mut skipped).await;
+
+    // Documents next, because the cards point at them: a reference on a task names a document by the id
     // it had on the other board, and that id has to be ON this board before a card can be built pointing
     // at it.
     let documents = write_documents(app, &mut archive, &project, who, &mut skipped).await?;
@@ -445,17 +454,98 @@ async fn write_documents(
 /// boards, or it lands beside nothing at all and is simply never looked up.
 ///
 /// A refused brief is skipped rather than failing the import: what it costs is one document reading as
-/// unread on a board that has just gained everything else.
-async fn import_briefs(app: &AppContext, archive: &mut ImportArchive<'_>, who: &str) {
-    let Ok(file) = archive.read_yaml_or_default::<BriefsFile>(BRIEFS_FILE) else {
-        return;
+/// unread on a board that has just gained everything else. **Skipped and SAID**, like every other entry
+/// this import cannot write — the same goes for a `briefs.yaml` that will not parse, which is the one list
+/// file here whose failure is not allowed to stop the import: the others are the board, and this one is
+/// notes about it.
+async fn import_briefs(
+    app: &AppContext,
+    archive: &mut ImportArchive<'_>,
+    who: &str,
+    skipped: &mut Vec<SkippedImport>,
+) {
+    let file = match archive.read_yaml_or_default::<BriefsFile>(BRIEFS_FILE) {
+        Ok(file) => file,
+        Err(err) => {
+            skipped.push(SkippedImport::new(BRIEFS_FILE, err));
+            return;
+        }
     };
 
-    for row in file.briefs {
-        let who = row.updated_by.as_deref().unwrap_or(who);
+    let to_file = briefs_to_file(file, who, |hash| app.briefs.get(hash).is_some(), skipped);
 
-        let _ = crate::scripts::set_brief(app, &row.content_hash, &row.brief, who).await;
+    for brief in to_file {
+        if let Err(err) =
+            crate::scripts::set_brief(app, &brief.content_hash, &brief.text, &brief.who).await
+        {
+            skipped.push(SkippedImport::new(
+                format!("{BRIEFS_FILE}: {}", brief.content_hash),
+                err,
+            ));
+        }
     }
+}
+
+/// One brief out of an archive that this instance has no brief for yet.
+struct BriefToFile {
+    content_hash: String,
+    text: String,
+    who: String,
+}
+
+/// Which of an archive's briefs to file, and a line for each one that cannot be.
+///
+/// **A content this instance has already briefed keeps the brief it has.** An import only ever adds, and a
+/// brief is the one thing in an archive that is not this project's alone: it is filed under the hash of a
+/// text, so the same text anywhere on this server already answers to it. That is every brief in the file
+/// when a board is copied on the instance the original still lives on — the common case for an import —
+/// and writing them again would only restamp each one as rephrased today. On another instance it is the
+/// rare text both hold, where what is here was written by somebody who read it here.
+///
+/// The check is a closure rather than the index itself so that this half — every decision the import
+/// makes about a brief — runs in a test, where the rest of an `AppContext` is Postgres.
+///
+/// A hash written twice in one file is filed once, the first of them: the second would only overwrite it.
+fn briefs_to_file(
+    file: BriefsFile,
+    who: &str,
+    is_briefed: impl Fn(&str) -> bool,
+    skipped: &mut Vec<SkippedImport>,
+) -> Vec<BriefToFile> {
+    let mut result: Vec<BriefToFile> = Vec::with_capacity(file.briefs.len());
+
+    for row in file.briefs {
+        // The spelling the index is keyed by. A hash that is not one names no text on any board.
+        let content_hash = match crate::documents::normalise_content_hash(&row.content_hash) {
+            Ok(content_hash) => content_hash,
+            Err(err) => {
+                skipped.push(SkippedImport::new(BRIEFS_FILE, err));
+                continue;
+            }
+        };
+
+        if is_briefed(&content_hash) || result.iter().any(|itm| itm.content_hash == content_hash) {
+            continue;
+        }
+
+        // Whoever wrote it, when the file says — the import is not the reading. An archive with no
+        // author on a brief is signed by whoever pressed Import, as a document with none is.
+        let who = row
+            .updated_by
+            .as_deref()
+            .map(str::trim)
+            .filter(|itm| !itm.is_empty())
+            .unwrap_or(who)
+            .to_string();
+
+        result.push(BriefToFile {
+            content_hash,
+            text: row.brief,
+            who,
+        });
+    }
+
+    result
 }
 
 /// Source handle -> the number it gets on this board.
@@ -1489,6 +1579,124 @@ mod tests {
     /// The four list files are the ones an archive may be without, and an absent one means "none of those"
     /// rather than "this is not an export". For `releases.yaml` that is not a courtesy to hand-made archives:
     /// it is every archive this product wrote before a board could have a release.
+    fn a_brief(content_hash: &str, brief: &str, updated_by: Option<&str>) -> BriefFileModel {
+        BriefFileModel {
+            content_hash: content_hash.to_string(),
+            brief: brief.to_string(),
+            updated_by: updated_by.map(|itm| itm.to_string()),
+        }
+    }
+
+    /// **`briefs.yaml` is read on the way in.** For as long as the file existed nothing opened it: the
+    /// export wrote it and the import had the function and no call. This reads one as the export writes
+    /// it — through the same model, into a zip — which is the half of that an `AppContext` is not needed
+    /// for, and the half that would have failed first.
+    #[test]
+    fn the_briefs_an_export_wrote_are_read_back() {
+        let hash = "0e299dc4".repeat(8);
+
+        let written = BriefsFile {
+            briefs: vec![a_brief(
+                &hash,
+                "What the board is for.\n\n- columns: who sets them\n- goals: \"epics\"",
+                Some("yuri@example.com"),
+            )],
+        };
+
+        let archive = zip_of(&[
+            (PROJECT_FILE, &a_project_file()),
+            (
+                BRIEFS_FILE,
+                serde_yaml::to_string(&written).unwrap().as_bytes(),
+            ),
+        ]);
+
+        let mut read = ImportArchive::open(&archive).unwrap();
+        let file = read.read_yaml_or_default::<BriefsFile>(BRIEFS_FILE).unwrap();
+
+        let mut skipped = Vec::new();
+        let to_file = briefs_to_file(file, "importer@example.com", |_| false, &mut skipped);
+
+        assert!(skipped.is_empty());
+        assert_eq!(to_file.len(), 1);
+        assert_eq!(to_file[0].content_hash, hash);
+        assert_eq!(to_file[0].text, written.briefs[0].brief, "prose and all");
+        assert_eq!(to_file[0].who, "yuri@example.com");
+
+        // And an archive without the file — every one made before briefs travelled — has none to file.
+        let archive = zip_of(&[(PROJECT_FILE, &a_project_file())]);
+        let mut read = ImportArchive::open(&archive).unwrap();
+
+        assert!(
+            read.read_yaml_or_default::<BriefsFile>(BRIEFS_FILE)
+                .unwrap()
+                .briefs
+                .is_empty()
+        );
+    }
+
+    /// An import only ever adds. A text this instance has already briefed keeps the brief it has — which
+    /// on a copy made beside the original is every brief in the file, and must not restamp one of them.
+    #[test]
+    fn a_brief_is_filed_only_where_this_instance_has_none() {
+        let already_here = "a".repeat(64);
+        let new_here = "b".repeat(64);
+
+        let file = BriefsFile {
+            briefs: vec![
+                a_brief(&already_here, "the archive's reading", Some("yuri@example.com")),
+                // Written in capitals, as a hand-edited file might: it is the same hash, and the index
+                // is keyed by the lower-case spelling.
+                a_brief(&new_here.to_uppercase(), "what it covers", None),
+                // The same text briefed twice in one file. The first stands.
+                a_brief(&new_here, "a second opinion", Some("yuri@example.com")),
+            ],
+        };
+
+        let mut skipped = Vec::new();
+
+        let to_file = briefs_to_file(
+            file,
+            "importer@example.com",
+            |hash| hash == already_here,
+            &mut skipped,
+        );
+
+        assert!(skipped.is_empty(), "leaving a brief alone is not a failure to report");
+        assert_eq!(to_file.len(), 1);
+        assert_eq!(to_file[0].content_hash, new_here);
+        assert_eq!(to_file[0].text, "what it covers");
+        assert_eq!(
+            to_file[0].who, "importer@example.com",
+            "nobody signed it, so whoever imported it does"
+        );
+    }
+
+    /// A brief filed under something that is not a hash would be a brief nothing could ever find. It is
+    /// left out and said so, and it does not cost the briefs beside it.
+    #[test]
+    fn a_brief_under_something_that_is_not_a_hash_is_skipped_and_said() {
+        let good = "c".repeat(64);
+
+        let file = BriefsFile {
+            briefs: vec![
+                a_brief("docs/design/system.md", "filed by path, by hand", None),
+                a_brief(&good, "what it covers", Some("  ")),
+            ],
+        };
+
+        let mut skipped = Vec::new();
+        let to_file = briefs_to_file(file, "importer@example.com", |_| false, &mut skipped);
+
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].name, BRIEFS_FILE);
+        assert!(skipped[0].reason.contains("docs/design/system.md"));
+
+        assert_eq!(to_file.len(), 1);
+        assert_eq!(to_file[0].content_hash, good);
+        assert_eq!(to_file[0].who, "importer@example.com", "a blank author is no author");
+    }
+
     #[test]
     fn the_list_files_may_be_absent() {
         let archive = zip_of(&[(PROJECT_FILE, &a_project_file())]);
