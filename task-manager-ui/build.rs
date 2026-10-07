@@ -23,6 +23,7 @@ fn main() {
         .add_file("08-goals.css")
         .add_file("09-markdown.css")
         .add_file("10-documents.css")
+        .add_file("11-releases.css")
         .compile("./public/assets/app.css");
 
     generate_task_icons_list();

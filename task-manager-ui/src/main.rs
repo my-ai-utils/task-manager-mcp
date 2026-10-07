@@ -48,6 +48,10 @@ pub enum AppRoute {
     // arguments — nothing here is searched, and which project is showing is remembered rather than linked.
     #[route("/goals")]
     Goals {},
+    // What has gone out, newest first. No query arguments, for the reason Goals has none: which project
+    // is showing is remembered rather than linked.
+    #[route("/releases")]
+    Releases {},
     // The project's documents: the tree on the left, whatever is selected on the right. The selection is IN
     // the url so a document can be linked to — an agent can say "see TM/docs/design.md" as an address, and a
     // reload lands back on it. Modelled on the file browser in `remote-development-mcp`.
@@ -190,6 +194,15 @@ fn Goals() -> Element {
     rsx! {
         Shell { active: "goals",
             crate::views::goals::RenderGoals {}
+        }
+    }
+}
+
+#[component]
+fn Releases() -> Element {
+    rsx! {
+        Shell { active: "releases",
+            crate::views::releases::RenderReleases {}
         }
     }
 }

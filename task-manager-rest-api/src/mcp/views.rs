@@ -3,7 +3,7 @@ use rust_extensions::AsStr;
 use serde::{Deserialize, Serialize};
 
 use crate::board::{
-    BoardInner, GoalModel, ProjectModel, TaskModel, UserModel, compose_task_handle,
+    BoardInner, GoalModel, ProjectModel, ReleaseModel, TaskModel, UserModel, compose_task_handle,
 };
 
 /// One column of a board, as a tool sees it.
@@ -169,6 +169,10 @@ pub struct GoalView {
     )]
     pub documents: Vec<String>,
     #[property(
+        description = "The releases this goal went out in, newest first — each one whole, with its services and their versions. A goal is the description of a feature and a release is the record of it shipping, so THIS is what answers 'is it out, and in which version of what'. Empty means nothing under this goal has been recorded as released, which is not the same as nothing being deployed. Attach one with `goal` on releases_create, or with add_releases on goals_update"
+    )]
+    pub releases: Vec<ReleaseView>,
+    #[property(
         description = "How many notes are on the goal's thread. This is where the reasoning lives — read it with goals_get_comments before acting on a goal somebody else shaped"
     )]
     pub comments_amount: i32,
@@ -202,6 +206,13 @@ impl GoalView {
             done_amount: done_amount as i32,
             subtasks: SubtaskView::from_models(&goal.subtasks),
             documents: goal.documents.clone(),
+            // Resolved through the board, which is what leaves a deleted release out and puts the rest in
+            // the one order every list of releases is in.
+            releases: board
+                .releases_of_goal(goal)
+                .iter()
+                .map(|release| ReleaseView::from_model(release, project, board))
+                .collect(),
             comments_amount: goal.comments.len() as i32,
             created_unix_seconds: goal.created.unix_microseconds / 1_000_000,
             updated_unix_seconds: goal.updated.unix_microseconds / 1_000_000,
@@ -211,6 +222,185 @@ impl GoalView {
             deleted_unix_seconds: goal
                 .deleted_moment
                 .map(|itm| itm.unix_microseconds / 1_000_000),
+        }
+    }
+}
+
+/// A moment a caller gave, as a tool hands it back: `2026-10-07T14:30:00Z`.
+///
+/// RFC 3339 in UTC, to the second — the spelling `releases_create` takes, so what a release reports is what
+/// can be passed straight back. Every OTHER moment on this surface is unix seconds, and the difference is
+/// deliberate: those are stamps this service put on, read by code; these two are statements somebody made
+/// and an agent has to repeat to a person, and `1791376200` cannot be read aloud.
+fn caller_moment_to_view(moment: rust_extensions::date_time::DateTimeAsMicroseconds) -> String {
+    let stamp = moment.to_rfc3339_utc();
+
+    match stamp.split_once('.') {
+        Some((to_the_second, _)) => format!("{to_the_second}Z"),
+        None => stamp,
+    }
+}
+
+/// One microservice of a release, as a tool sees it.
+#[derive(ApplyJsonSchema, Debug, Serialize, Deserialize)]
+pub struct ServiceReleaseView {
+    #[property(
+        description = "Which microservice — the name it is deployed under. The identity of this entry within its release: it is what releases_update finds the entry by, to correct it or to remove it"
+    )]
+    pub microservice_id: String,
+    #[property(description = "Which version of it went out")]
+    pub version: String,
+    #[property(
+        description = "The commit that version was built from, lower-case hex. The half of the entry that cannot have moved since: a tag can be re-pointed, this cannot"
+    )]
+    pub git_hash: String,
+    #[property(
+        description = "When this service went out, as `2026-10-07T14:30:00Z` (UTC). What whoever recorded the release SAID — nothing here checks it against a deploy"
+    )]
+    pub datetime: String,
+    #[property(
+        description = "WHAT HAS TO CHANGE IN THIS SERVICE'S SETTINGS for the release to work — a key to add, a value to change, a secret to supply. Empty means nothing changes. Kept apart from `description` because it is the one part of a release somebody has to ACT on while rolling it out: read it before deploying this version anywhere else"
+    )]
+    pub settings_update_note: String,
+    #[property(
+        description = "Anything else worth knowing about this service's part of the release, as Markdown. Often empty"
+    )]
+    pub description: String,
+}
+
+/// One release, as a tool sees it.
+///
+/// The record that a feature went out, and in what. Whole wherever it appears — in `releases_list` and on
+/// the goal that lists it alike — because the services ARE the release: a view without them would be a
+/// title and a date.
+#[derive(ApplyJsonSchema, Debug, Serialize, Deserialize)]
+pub struct ReleaseView {
+    #[property(
+        description = "The release id, like `RMS-R12`. This is how a release is named everywhere — in releases_update, and in add_releases on a goal. The number comes from the same counter task and goal numbers come from, so `RMS-12`, `RMS-G12` and `RMS-R12` are never more than one real thing; the `R` is what says which kind you are holding"
+    )]
+    pub id: String,
+    #[property(description = "The prefix of the project this release belongs to")]
+    pub project: String,
+    #[property(description = "What went out, in one line")]
+    pub title: String,
+    #[property(description = "What this release is, as Markdown — the context around it")]
+    pub description: String,
+    #[property(
+        description = "What changed for whoever is on the receiving end, as Markdown. The part meant to be repeated to the people affected"
+    )]
+    pub release_notes: String,
+    #[property(
+        description = "The date of the release, as `2026-10-07T00:00:00Z` (UTC) — what its author gave, and what every list of releases is ordered by, newest first. Not when the record was written: that is `created_unix_seconds`, and a release is often written down after the fact"
+    )]
+    pub date: String,
+    #[property(
+        description = "One entry per microservice this release touched, in the order they were added: which version went out, built from which commit, and whether its settings have to change. A release with none is a title and a date — add them with releases_update"
+    )]
+    pub services: Vec<ServiceReleaseView>,
+    #[property(
+        description = "Ids of the goals that list this release — normally exactly one, the feature it shipped. Derived, not stored on the release: a goal says which releases it went out in. Empty means nobody has attached it to a goal yet"
+    )]
+    pub goals: Vec<String>,
+    #[property(description = "When the release was written down, unix seconds (UTC)")]
+    pub created_unix_seconds: i64,
+    #[property(description = "When the record last changed, unix seconds (UTC)")]
+    pub updated_unix_seconds: i64,
+    #[property(
+        description = "When it was DELETED, unix seconds (UTC), and absent for a release that is not. A deleted release is gone from every list and from every goal that listed it, and is still reachable by its id — which is the only way you are seeing this field. releases_update with `deleted: false` brings it back, onto those goals too"
+    )]
+    pub deleted_unix_seconds: Option<i64>,
+}
+
+impl ReleaseView {
+    pub fn from_model(release: &ReleaseModel, project: &ProjectModel, board: &BoardInner) -> Self {
+        Self {
+            id: crate::board::compose_release_handle(&project.prefix, release.number),
+            project: project.prefix.clone(),
+            title: release.title.clone(),
+            description: release.description.clone(),
+            release_notes: release.release_notes.clone(),
+            date: caller_moment_to_view(release.date),
+            services: release
+                .services
+                .iter()
+                .map(|itm| ServiceReleaseView {
+                    microservice_id: itm.microservice_id.clone(),
+                    version: itm.version.clone(),
+                    git_hash: itm.git_hash.clone(),
+                    datetime: caller_moment_to_view(itm.datetime),
+                    settings_update_note: itm.settings_update_note.clone(),
+                    description: itm.description.clone(),
+                })
+                .collect(),
+            goals: board
+                .goals_of_release(&release.project_id, release.number)
+                .iter()
+                .map(|goal| crate::board::compose_goal_handle(&project.prefix, goal.number))
+                .collect(),
+            created_unix_seconds: release.created.unix_microseconds / 1_000_000,
+            updated_unix_seconds: release.updated.unix_microseconds / 1_000_000,
+            deleted_unix_seconds: release
+                .deleted_moment
+                .map(|itm| itm.unix_microseconds / 1_000_000),
+        }
+    }
+}
+
+/// One microservice to put in a release, as a write tool takes it.
+#[derive(ApplyJsonSchema, Debug, Serialize, Deserialize)]
+pub struct ServiceReleaseInput {
+    #[property(
+        description = "Which microservice — the name it is deployed under, one word, like `my-service`. A release names a service ONCE: passing one it already has corrects that entry rather than adding a second"
+    )]
+    pub microservice_id: String,
+    #[property(description = "Which version of it went out, like `1.2.3`. One word")]
+    pub version: String,
+    #[property(
+        description = "The commit that version was built from — 7 to 64 hex characters, as `git rev-parse HEAD` prints it. It has to be a HASH: a branch or a tag is refused, because both can move and a release is a record of what cannot"
+    )]
+    pub git_hash: String,
+    #[property(
+        description = "When this service went out: `2026-10-07`, or a date and time like `2026-10-07T14:30:00Z`. A zone offset such as `+03:00` is honoured; no zone means UTC. Omit for now, which is right when you are recording it as it happens"
+    )]
+    pub datetime: Option<String>,
+    #[property(
+        description = "WHAT HAS TO CHANGE IN THIS SERVICE'S SETTINGS for the release to work, as Markdown — the key to add, the value to change, the secret to supply. Its own field on purpose: it is the part of a release somebody has to act on, and the board marks the services that carry one. Omit when the settings do not change. On a service the release already has, omitting it leaves the note alone and an empty string clears it"
+    )]
+    pub settings_update_note: Option<String>,
+    #[property(
+        description = "Anything else about this service's part of the release, as Markdown. NOT for settings changes — those go in settings_update_note. Omit when there is nothing to add; on a service the release already has, omitting it leaves what is there"
+    )]
+    pub description: Option<String>,
+}
+
+impl ServiceReleaseInput {
+    /// The services a write tool was handed, as the write path takes them.
+    pub fn into_new(src: Option<Vec<Self>>) -> Vec<crate::scripts::NewServiceRelease> {
+        src.unwrap_or_default()
+            .into_iter()
+            .map(|itm| crate::scripts::NewServiceRelease {
+                microservice_id: itm.microservice_id,
+                version: itm.version,
+                git_hash: itm.git_hash,
+                datetime: itm.datetime,
+                settings_update_note: itm.settings_update_note,
+                description: itm.description,
+            })
+            .collect()
+    }
+}
+
+/// The release-reference fields of a goal's write tool, gathered so the conversion lives in one place.
+pub struct ReleaseOps {
+    pub add: Option<Vec<String>>,
+    pub remove: Option<Vec<String>>,
+}
+
+impl ReleaseOps {
+    pub fn into_patch(self) -> crate::scripts::ReleasesPatch {
+        crate::scripts::ReleasesPatch {
+            add: self.add.unwrap_or_default(),
+            remove: self.remove.unwrap_or_default(),
         }
     }
 }

@@ -4,7 +4,8 @@ use arc_swap::ArcSwap;
 
 use super::board_inner::BoardInner;
 use super::models::{
-    ColumnTemplateModel, GoalModel, KindTemplateModel, ProjectModel, TaskModel, UserModel,
+    ColumnTemplateModel, GoalModel, KindTemplateModel, ProjectModel, ReleaseModel, TaskModel,
+    UserModel,
 };
 
 /// The product state, held entirely in memory.
@@ -88,6 +89,11 @@ impl Board {
         self.mutate(|inner| inner.put_goal(Arc::new(goal)));
     }
 
+    /// Save a release. No removal counterpart either: one recorded by mistake is flagged deleted.
+    pub fn upsert_release(&self, release: ReleaseModel) {
+        self.mutate(|inner| inner.put_release(Arc::new(release)));
+    }
+
     pub fn upsert_task(&self, task: TaskModel) {
         self.mutate(|inner| inner.put_task(Arc::new(task)));
     }
@@ -96,19 +102,33 @@ impl Board {
         self.mutate(|inner| inner.put_user(Arc::new(user)));
     }
 
-    /// Put a whole batch of goals and tasks in, in ONE snapshot swap.
+    /// Put a whole batch of goals, releases and tasks in, in ONE snapshot swap.
     ///
-    /// The bulk counterpart of [`Self::upsert_goal`] and [`Self::upsert_task`], and it exists for the one
-    /// caller that writes hundreds of rows in a single request: importing a project. Done one at a time, that
-    /// is one clone of the board and one `rebuild_indexes` per card — quadratic in the size of the board for
-    /// no reason, since every screen only ever sees the snapshot at the end of it either way.
+    /// The bulk counterpart of [`Self::upsert_goal`], [`Self::upsert_release`] and [`Self::upsert_task`], and
+    /// it exists for the one caller that writes hundreds of rows in a single request: importing a project.
+    /// Done one at a time, that is one clone of the board and one `rebuild_indexes` per row — quadratic in
+    /// the size of the board for no reason, since every screen only ever sees the snapshot at the end of it
+    /// either way.
     ///
-    /// Nothing about the semantics differs from calling the two singular methods in a loop: the batch is
+    /// Releases are in the batch rather than swapped in beside it, because the goals in it list them by
+    /// number: one swap means no reader ever holds a snapshot with those goals in it and the releases they
+    /// name not yet there.
+    ///
+    /// Nothing about the semantics differs from calling the three singular methods in a loop: the batch is
     /// applied in order, and the indexes are rebuilt once at the end, which is exactly what they would be.
-    pub fn upsert_goals_and_tasks(&self, goals: Vec<GoalModel>, tasks: Vec<TaskModel>) {
+    pub fn upsert_goals_releases_and_tasks(
+        &self,
+        goals: Vec<GoalModel>,
+        releases: Vec<ReleaseModel>,
+        tasks: Vec<TaskModel>,
+    ) {
         self.mutate(|inner| {
             for goal in goals {
                 inner.put_goal(Arc::new(goal));
+            }
+
+            for release in releases {
+                inner.put_release(Arc::new(release));
             }
 
             for task in tasks {

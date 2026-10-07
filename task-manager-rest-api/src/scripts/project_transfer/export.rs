@@ -6,7 +6,10 @@ use rust_extensions::date_time::DateTimeAsMicroseconds;
 use service_sdk::my_telemetry::MyTelemetryContext;
 
 use crate::app::AppContext;
-use crate::board::{GoalModel, ProjectModel, TaskModel, compose_goal_handle, compose_task_handle};
+use crate::board::{
+    GoalModel, ProjectModel, ReleaseModel, TaskModel, compose_goal_handle, compose_release_handle,
+    compose_task_handle,
+};
 
 use super::models::*;
 
@@ -37,13 +40,15 @@ pub struct ExportedFile {
 
 /// Write one project into a zip in the temp directory.
 ///
-/// The archive holds four YAML files and a `documents/` folder — see [`super::models`] for the shape of each.
-/// What goes in is the whole board: every goal, every task, every comment on either, and every document the
-/// project owns.
+/// The archive holds one YAML file per kind of thing and a `documents/` folder — see [`super::models`] for the
+/// shape of each. What goes in is the whole board: every goal, every task, every comment on either, every
+/// release, and every document the project owns.
 ///
 /// **Deleted work is exported too.** A deleted task is hidden from every screen and kept so that searching
 /// for its id still finds it; leaving it out would make an export a quiet way of losing the record, and a
 /// hand-editable `tasks.yaml` is a better answer for anybody who wants it gone than a decision made here.
+/// A deleted release has one reason more: the goals that listed it still do, so that bringing it back puts
+/// it on them again, and that only holds on the other board if the release is there to bring back.
 ///
 /// **A connected repository is not.** Documents under the reserved `github/` root are files in a working copy
 /// on disk, mirrored from a repository that is still there — they are not this project's to carry, and the
@@ -52,7 +57,7 @@ pub struct ExportedFile {
 pub async fn export_project(app: &AppContext, project_prefix: &str) -> Result<ExportedFile, String> {
     // Everything read off the board happens here, in one block: `parking_lot`'s guard is `!Send`, so a read
     // held across the awaits below would not compile — which is the compiler enforcing what we want anyway.
-    let (project, goals, tasks) = {
+    let (project, goals, tasks, releases) = {
         let board = app.board.read();
         let project = super::super::resolve_project_by_prefix(&board, project_prefix)?;
 
@@ -74,7 +79,20 @@ pub async fn export_project(app: &AppContext, project_prefix: &str) -> Result<Ex
 
         tasks.sort_by_key(|itm| itm.number);
 
-        (project.as_ref().clone(), goals, tasks)
+        // By number here too, and for a release that is more than how the file reads. Every list of
+        // releases is newest first by their DATE, and the number is what orders two of one date — the
+        // later number is the one written down later. The import hands numbers out in file order, so the
+        // file has to be in the order the numbers were: written the way those lists read, two releases of
+        // one day would arrive the other way round.
+        let mut releases: Vec<ReleaseModel> = board
+            .releases_of_project_including_deleted(&project.id)
+            .iter()
+            .map(|itm| itm.as_ref().clone())
+            .collect();
+
+        releases.sort_by_key(|itm| itm.number);
+
+        (project.as_ref().clone(), goals, tasks, releases)
     };
 
     // The documents to carry, resolved from the in-memory index — paths and ids, no payloads. The payloads
@@ -91,7 +109,7 @@ pub async fn export_project(app: &AppContext, project_prefix: &str) -> Result<Ex
 
     // Built inside so one `?` can clean up after itself: a half-written archive left in the temp directory
     // would sit there until the container is replaced.
-    match build(app, &path, &project, &goals, &tasks, &documents).await {
+    match build(app, &path, &project, &goals, &tasks, &releases, &documents).await {
         Ok(size) => Ok(ExportedFile {
             path,
             file_name: file_name_for(&project.prefix, now),
@@ -135,6 +153,7 @@ async fn build(
     project: &ProjectModel,
     goals: &[GoalModel],
     tasks: &[TaskModel],
+    releases: &[ReleaseModel],
     documents: &[crate::documents::DocumentIndexEntry],
 ) -> Result<u64, String> {
     let comments = comments_file(project, goals, tasks);
@@ -155,6 +174,7 @@ async fn build(
             tasks: tasks.len(),
             comments: comments.comments.len(),
             documents: documents.len(),
+            releases: releases.len(),
         },
     };
 
@@ -179,6 +199,20 @@ async fn build(
         },
     )?;
     write_yaml(&mut writer, COMMENTS_FILE, &comments)?;
+
+    // Written whether or not there is a release to put in it, as the lists above are and `briefs.yaml`
+    // below is not: `releases: []` says this board had none, where no file at all says the archive was
+    // made before a board could have one.
+    write_yaml(
+        &mut writer,
+        RELEASES_FILE,
+        &ReleasesFile {
+            releases: releases
+                .iter()
+                .map(|itm| release_to_file(project, itm))
+                .collect(),
+        },
+    )?;
 
     // Beside the bytes rather than in place of them: `documents/` stays a plain folder of the project's
     // files, openable by anything, and this says what each of those files IS — above all which id it has,
@@ -341,7 +375,10 @@ fn comments_file(project: &ProjectModel, goals: &[GoalModel], tasks: &[TaskModel
     CommentsFile { comments }
 }
 
-fn goal_to_file(project: &ProjectModel, goal: &GoalModel) -> GoalFileModel {
+// `pub(super)` on this and on `release_to_file` for one caller: the import's round-trip test, which has to
+// start from what THIS writes rather than from a file model it built for itself, or it would pass with a
+// field the export forgot.
+pub(super) fn goal_to_file(project: &ProjectModel, goal: &GoalModel) -> GoalFileModel {
     GoalFileModel {
         id: compose_goal_handle(&project.prefix, goal.number),
         name_base64: encode_text(&goal.name),
@@ -350,6 +387,13 @@ fn goal_to_file(project: &ProjectModel, goal: &GoalModel) -> GoalFileModel {
         priority: goal.priority.as_str().to_string(),
         subtasks: goal.subtasks.iter().map(subtask_to_file).collect(),
         documents: goal.documents.clone(),
+        // The STORED list, in the order it was attached in, and not `releases_of_goal`: that one reads
+        // past a deleted release, and a goal has to arrive still listing it — see `export_project`.
+        releases: goal
+            .releases
+            .iter()
+            .map(|number| compose_release_handle(&project.prefix, *number))
+            .collect(),
         created: encode_moment(goal.created),
         updated: encode_moment(goal.updated),
         closed: goal.close_moment.map(encode_moment),
@@ -393,6 +437,31 @@ fn task_to_file(project: &ProjectModel, task: &TaskModel) -> TaskFileModel {
         updated: encode_moment(task.updated),
         closed: task.close_moment.map(encode_moment),
         deleted: task.deleted_moment.map(encode_moment),
+    }
+}
+
+pub(super) fn release_to_file(project: &ProjectModel, release: &ReleaseModel) -> ReleaseFileModel {
+    ReleaseFileModel {
+        id: compose_release_handle(&project.prefix, release.number),
+        title_base64: encode_text(&release.title),
+        description_base64: encode_text(&release.description),
+        release_notes_base64: encode_text(&release.release_notes),
+        date: encode_moment(release.date),
+        services: release
+            .services
+            .iter()
+            .map(|itm| ServiceReleaseFileModel {
+                microservice_id: itm.microservice_id.clone(),
+                version: itm.version.clone(),
+                git_hash: itm.git_hash.clone(),
+                datetime: encode_moment(itm.datetime),
+                settings_update_note_base64: encode_text(&itm.settings_update_note),
+                description_base64: encode_text(&itm.description),
+            })
+            .collect(),
+        created: encode_moment(release.created),
+        updated: encode_moment(release.updated),
+        deleted: release.deleted_moment.map(encode_moment),
     }
 }
 

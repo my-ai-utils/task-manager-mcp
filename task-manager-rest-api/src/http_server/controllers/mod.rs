@@ -5,6 +5,7 @@ pub mod github;
 pub mod goals;
 pub mod kind_templates;
 pub mod projects;
+pub mod releases;
 pub mod system;
 pub mod tasks;
 pub mod templates;

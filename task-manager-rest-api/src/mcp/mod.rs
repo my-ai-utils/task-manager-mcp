@@ -13,6 +13,7 @@ mod github_refresh_tool_call;
 mod goals_tool_calls;
 mod labels_list_tool_call;
 mod projects_list_tool_call;
+mod releases_tool_calls;
 mod resolve_id_tool_call;
 mod tasks_list_tool_call;
 mod tasks_search_tool_call;
@@ -40,6 +41,9 @@ use goals_tool_calls::{
 };
 use labels_list_tool_call::LabelsListHandler;
 use projects_list_tool_call::ProjectsListHandler;
+use releases_tool_calls::{
+    ReleasesCreateHandler, ReleasesDeleteHandler, ReleasesListHandler, ReleasesUpdateHandler,
+};
 use resolve_id_tool_call::ResolveIdHandler;
 use tasks_list_tool_call::TasksListHandler;
 use tasks_search_tool_call::TasksSearchHandler;
@@ -294,6 +298,34 @@ attached is one somebody has to go and find in a CI history later. The same url 
 moment is stamped for you, and no check is made against GitHub — what is stored is what you said, so say \
 it accurately.\
 \
+A RELEASE IS THE RECORD THAT A FEATURE WENT OUT, AND IT BELONGS TO THE PROJECT. Not to a task and not \
+to a goal: it is a thing of its own, named `RMS-R12` — a number out of the same counter tasks and goals \
+draw from, so `RMS-12`, `RMS-G12` and `RMS-R12` are never more than one real thing. Record one with \
+releases_create when work ships. ONE release is one feature across however many microservices it \
+touched: the release carries what changed — `title`, `description`, `release_notes` and the `date` it \
+went out — and `services` carries one entry per microservice: its `microservice_id`, the `version` that \
+went out, the `git_hash` that version was built from, and `datetime`. A build link on a task says a \
+change was built; a release says what is OUT, and it is the first thing to read when somebody asks \
+which version of a service is deployed.\
+\
+A GOAL LISTS THE RELEASES IT WENT OUT IN. The goal is the description of the feature and the release is \
+the record of it shipping, so pass `goal` to releases_create and the two are joined in that same call; \
+a release recorded without one is attached later with add_releases on goals_update. Every goal then \
+reports its `releases` whole. Normally a release ships one goal, and nothing enforces that — attach it \
+to the goal it is actually about rather than to every goal it brushed against.\
+\
+A SETTINGS CHANGE IS WRITTEN WHERE IT CANNOT BE MISSED. Each service in a release has a \
+`settings_update_note`, separate from its `description`: if rolling that service out needs its settings \
+changed — a key added, a value changed, a secret supplied — that goes there and nowhere else, because \
+it is the one part of a release somebody has to ACT on. Empty means the settings do not change. Read it \
+before deploying a recorded version anywhere, and write it in the same call that records the service. \
+A release names a microservice ONCE: passing one it already has to releases_update corrects that entry \
+rather than adding a second.\
+\
+A RELEASE IS NOT DELETED FOR BEING ROLLED BACK. It happened; say what became of it in its \
+`description`. releases_delete is for one recorded by mistake, and like every deletion here it is a \
+flag — `deleted: false` on releases_update brings it back, onto the goals that listed it too.\
+\
 MOVING A TASK TO `done` REQUIRES A COMMENT, AND THE MOVE IS REFUSED WITHOUT ONE. Pass `comment` and \
 `comment_by` to tasks_update in the same call as the status change. Say what was actually done — what \
 changed, and anything the next person should know — not that it is finished, which the column already \
@@ -373,6 +405,9 @@ pub fn build_middleware(app: Arc<AppContext>) -> McpMiddleware {
     // state", a search answers "where was this discussed", and an agent arriving at a board needs both.
     mcp.register_tool_call(Arc::new(TasksSearchHandler::new(app.clone())));
     mcp.register_tool_call(Arc::new(ResolveIdHandler::new(app.clone())));
+    // The last of the reads, because it is the last question asked of a piece of work: not what it is or
+    // where it stands, but whether it is out.
+    mcp.register_tool_call(Arc::new(ReleasesListHandler::new(app.clone())));
 
     mcp.register_tool_call(Arc::new(GoalsCreateHandler::new(app.clone())));
     mcp.register_tool_call(Arc::new(GoalsUpdateHandler::new(app.clone())));
@@ -381,6 +416,12 @@ pub fn build_middleware(app: Arc<AppContext>) -> McpMiddleware {
     mcp.register_tool_call(Arc::new(TasksUpdateHandler::new(app.clone())));
     mcp.register_tool_call(Arc::new(TasksDeleteHandler::new(app.clone())));
     mcp.register_tool_call(Arc::new(GoalsDeleteHandler::new(app.clone())));
+
+    // After everything that changes the work, in the order the work itself goes: a goal is opened, tasks
+    // are done under it, and then it ships.
+    mcp.register_tool_call(Arc::new(ReleasesCreateHandler::new(app.clone())));
+    mcp.register_tool_call(Arc::new(ReleasesUpdateHandler::new(app.clone())));
+    mcp.register_tool_call(Arc::new(ReleasesDeleteHandler::new(app.clone())));
 
     // Documents. After the board tools, because a document is read in the course of doing work rather than
     // to find out what the work is — and in the order a large one is actually approached: find which
@@ -453,6 +494,84 @@ mod tests {
                 "remove_subtasks",
                 // From the nested item itself, which is the half a flat-only schema would lose.
                 "title",
+            ] {
+                assert!(
+                    schema.contains(expected),
+                    "the schema does not mention {expected}: {schema}"
+                );
+            }
+        }
+    }
+
+    /// A release's services are a nested object too, and the one this surface can least afford to lose: a
+    /// client that could not see `git_hash` or `settings_update_note` would record releases with neither,
+    /// and the tool would either refuse every call or — worse — accept a release that says nothing.
+    /// Checked on both tools that take the list, and on the goal tool that takes the references.
+    #[tokio::test]
+    async fn the_release_tools_describe_their_service_objects() {
+        let create = super::releases_tool_calls::ReleasesCreateInput::get_json_schema(false)
+            .await
+            .build();
+
+        let update = super::releases_tool_calls::ReleasesUpdateInput::get_json_schema(false)
+            .await
+            .build();
+
+        for (schema, list) in [(create, "services"), (update, "add_services")] {
+            for expected in [
+                list,
+                // From the nested item itself, which is the half a flat-only schema would lose.
+                "microservice_id",
+                "version",
+                "git_hash",
+                "datetime",
+                "settings_update_note",
+            ] {
+                assert!(
+                    schema.contains(expected),
+                    "the schema does not mention {expected}: {schema}"
+                );
+            }
+        }
+
+        let goals = super::goals_tool_calls::GoalsUpdateInput::get_json_schema(false)
+            .await
+            .build();
+
+        for expected in ["add_releases", "remove_releases"] {
+            assert!(
+                goals.contains(expected),
+                "the schema does not mention {expected}: {goals}"
+            );
+        }
+    }
+
+    /// The deepest nesting on this surface, and it is on the way OUT: a project carries its goals, a goal
+    /// its releases, a release its services — four objects deep, on the answer to the very first call an
+    /// agent makes. If the derive could not describe that, it would be `projects_list` that broke, which is
+    /// the one tool nothing else works without.
+    #[tokio::test]
+    async fn a_release_is_described_wherever_it_is_nested() {
+        let projects = super::projects_list_tool_call::ProjectsListResponse::get_json_schema(false)
+            .await
+            .build();
+
+        let goals = super::goals_tool_calls::GoalsListResponse::get_json_schema(false)
+            .await
+            .build();
+
+        let releases = super::releases_tool_calls::ReleasesListResponse::get_json_schema(false)
+            .await
+            .build();
+
+        for schema in [projects, goals, releases] {
+            for expected in [
+                "releases",
+                "release_notes",
+                // From the innermost object, which is the one a shallower schema would lose.
+                "microservice_id",
+                "git_hash",
+                "settings_update_note",
             ] {
                 assert!(
                     schema.contains(expected),

@@ -40,6 +40,8 @@ mod message;
 pub use message::*;
 mod refresh_github;
 pub use refresh_github::*;
+mod release_details;
+pub use release_details::*;
 mod upload_document;
 pub use upload_document::*;
 mod view_document;
@@ -667,10 +669,11 @@ fn import_report(response: &ImportProjectResponse) -> String {
     const REASONS_SHOWN: usize = 5;
 
     let mut text = format!(
-        "{}, {}, {} and {} imported.",
+        "{}, {}, {}, {} and {} imported.",
         count_of(response.goals as usize, "goal"),
         count_of(response.tasks as usize, "task"),
         count_of(response.comments as usize, "comment"),
+        count_of(response.releases as usize, "release"),
         count_of(response.documents as usize, "document"),
     );
 

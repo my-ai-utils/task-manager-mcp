@@ -5,8 +5,8 @@ use service_sdk::my_telemetry::MyTelemetryContext;
 
 use crate::app::AppContext;
 use crate::board::{
-    BoardInner, ColumnTemplateModel, GoalModel, KindTemplateModel, ProjectModel, TaskModel,
-    UserModel,
+    BoardInner, ColumnTemplateModel, GoalModel, KindTemplateModel, ProjectModel, ReleaseModel,
+    TaskModel, UserModel,
 };
 
 /// Read the whole product out of Postgres and install it in memory.
@@ -25,7 +25,7 @@ pub async fn load_state(app: &AppContext) {
     let template_rows = app.column_templates_repo.get_all(&ctx).await;
     let kind_template_rows = app.kind_templates_repo.get_all(&ctx).await;
     let goal_rows = app.goals_repo.get_all(&ctx).await;
-
+    let release_rows = app.releases_repo.get_all(&ctx).await;
 
     // Membership lives in its own table, so it is folded back onto the projects here — the only place
     // the two halves are joined.
@@ -86,5 +86,9 @@ pub async fn load_state(app: &AppContext) {
             .iter()
             .map(|row| row.into())
             .collect::<Vec<GoalModel>>(),
+        release_rows
+            .iter()
+            .map(|row| row.into())
+            .collect::<Vec<ReleaseModel>>(),
     ));
 }

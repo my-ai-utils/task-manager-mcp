@@ -12,6 +12,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::goals::GoalResponse;
+use crate::releases::ReleaseResponse;
 use crate::tasks::TaskResponse;
 
 // A whole board, pushed because it changed.
@@ -25,6 +26,11 @@ use crate::tasks::TaskResponse;
 // computed server-side and count archived work; `tasks` does NOT include archived work, so a client that
 // recomputed the counters from what is in this snapshot would disagree with the server, and disagree more
 // the older the goal. Take the numbers as given.
+//
+// `releases` is every live release of the project, newest first, for the same reason `goals` is here: one
+// recorded through MCP has to appear on the Releases screen without anybody re-reading anything. They are
+// NOT filtered by an archive window — a release does not age off, the list of them is the history. The
+// ones a goal went out in are also carried on that goal, so its dialog needs nothing from this list.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct BoardSnapshot {
     // The board's PREFIX — what the client sent in its `{"watch":…}` and what it compares this against to
@@ -33,6 +39,8 @@ pub struct BoardSnapshot {
     pub tasks: Vec<TaskResponse>,
     #[serde(default)]
     pub goals: Vec<GoalResponse>,
+    #[serde(default)]
+    pub releases: Vec<ReleaseResponse>,
 }
 
 // One message from the server. Exactly one of the fields is set on any given message.

@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use crate::board::{
-    BoardInner, GoalModel, ProjectModel, TaskModel, parse_goal_handle, parse_task_handle,
+    BoardInner, GoalModel, ProjectModel, ReleaseModel, TaskModel, parse_goal_handle,
+    parse_release_handle, parse_task_handle,
 };
 
 /// A task and the project it belongs to, resolved together.
@@ -17,6 +18,12 @@ pub struct ResolvedTask {
 pub struct ResolvedGoal {
     pub project: Arc<ProjectModel>,
     pub goal: Arc<GoalModel>,
+}
+
+/// A release and the project it belongs to. Same shape and same reason as [`ResolvedTask`].
+pub struct ResolvedRelease {
+    pub project: Arc<ProjectModel>,
+    pub release: Arc<ReleaseModel>,
 }
 
 /// The project a prefix names right now.
@@ -89,4 +96,28 @@ pub fn resolve_goal_by_handle(board: &BoardInner, handle: &str) -> Result<Resolv
         .ok_or_else(|| format!("no goal {handle} on the {} board", project.prefix))?;
 
     Ok(ResolvedGoal { project, goal })
+}
+
+/// The release a handle names right now — `RMS-R12`.
+///
+/// Only the marked spelling, for the reason [`resolve_goal_by_handle`] gives: a tool asked to change a
+/// release must not act on a task or a goal because the caller left the marker off.
+///
+/// A deleted release is found. The tools that take a handle are the ones that undelete it, and an id that
+/// came back as "no such release" would be indistinguishable from a typo.
+pub fn resolve_release_by_handle(
+    board: &BoardInner,
+    handle: &str,
+) -> Result<ResolvedRelease, String> {
+    let parsed = parse_release_handle(handle).ok_or_else(|| {
+        format!("'{handle}' is not a release id — expected something like RMS-R1")
+    })?;
+
+    let project = resolve_project_by_prefix(board, &parsed.prefix)?;
+
+    let release = board
+        .get_release_including_deleted(&project.id, parsed.number)
+        .ok_or_else(|| format!("no release {handle} on the {} board", project.prefix))?;
+
+    Ok(ResolvedRelease { project, release })
 }

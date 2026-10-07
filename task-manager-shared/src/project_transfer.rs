@@ -71,6 +71,11 @@ pub struct ImportProjectResponse {
     pub tasks: i32,
     pub comments: i32,
     pub documents: i32,
+    // Defaulted where the four above are required, and only for the changeover: a browser tab loaded
+    // before releases existed is answered by a server that knows them and ignores the field, but a tab
+    // loaded AFTER must still read the answer of a server that has not been rolled yet.
+    #[serde(default)]
+    pub releases: i32,
     #[serde(default)]
     pub skipped: Vec<SkippedImportEntryResponse>,
     #[serde(default)]

@@ -25,6 +25,7 @@ pub mod kind_templates;
 pub mod priority;
 pub mod project_transfer;
 pub mod projects;
+pub mod releases;
 pub mod subtasks;
 pub mod system;
 pub mod task_title;

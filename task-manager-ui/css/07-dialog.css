@@ -299,6 +299,16 @@
   padding-right: 4px;
 }
 
+/* Nothing in that column shrinks, which is the other half of "the scrolling lives here". It has to be
+   said: a flex item whose overflow is not `visible` has NO automatic minimum height, and `.md` sets
+   `overflow-x: auto` so a wide table scrolls sideways — which silently makes every rendered text
+   squeezable. Beside a short checklist nobody saw it. Beside a goal's releases, which are taller than the
+   dialog, the goal's own text was squeezed to nothing: all of the overflow came out of the one child that
+   could give way. */
+.task-view-left > * {
+  flex-shrink: 0;
+}
+
 .task-view-text {
   font-size: 14px;
   line-height: 1.5;

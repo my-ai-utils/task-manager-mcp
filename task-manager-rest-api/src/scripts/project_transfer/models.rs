@@ -10,18 +10,26 @@ pub use crate::scripts::transfer_encoding::{decode_moment, decode_text, encode_m
 /// The version is on the format, not on the product: a zip made by any build carrying `1` is readable by any
 /// build that understands `1`. A future shape that an older service could not apply correctly bumps this, and
 /// the import refuses it by name rather than half-applying something it misread.
+///
+/// **Releases arrived without moving it, and by that same test.** `releases.yaml` and the `releases` list on
+/// a goal are optional in both directions, as `briefs.yaml` was before them. This build reads an archive
+/// with neither as a board that has no releases, which is exactly what every archive written before they
+/// existed is. And a build from before them has nothing to misread: it never opens a file it does not know
+/// and passes over a field it does not know, so it lands the goals, tasks, comments and documents it always
+/// has and leaves the releases behind — the most it could have done with them, having nowhere to put one.
 pub const FORMAT: &str = "task-manager-project/1";
 
-/// The four files an export is made of, and the folder beside them.
+/// The files an export is made of, and the folder beside them.
 ///
 /// One file per kind of thing rather than one big document: `tasks.yaml` opened on its own is a readable list
-/// of tasks, and a diff between two exports says which of the four changed. `documents/` holds the documents
+/// of tasks, and a diff between two exports says which of them changed. `documents/` holds the documents
 /// as themselves — real bytes at their real paths — so the archive is also just a folder of the project's
 /// files, openable by anything.
 pub const PROJECT_FILE: &str = "project.yaml";
 pub const GOALS_FILE: &str = "goals.yaml";
 pub const TASKS_FILE: &str = "tasks.yaml";
 pub const COMMENTS_FILE: &str = "comments.yaml";
+pub const RELEASES_FILE: &str = "releases.yaml";
 pub const DOCUMENTS_FILE: &str = "documents.yaml";
 pub const DOCUMENTS_FOLDER: &str = "documents/";
 pub const BRIEFS_FILE: &str = "briefs.yaml";
@@ -125,6 +133,10 @@ pub struct ProjectFileContents {
     pub tasks: usize,
     pub comments: usize,
     pub documents: usize,
+    // Defaulted where the four above are required: an archive written before releases existed has no such
+    // line, and what it holds is none.
+    #[serde(default)]
+    pub releases: usize,
 }
 
 /// One checklist item. Identical on a task and on a goal, exactly as it is in memory.
@@ -178,6 +190,17 @@ pub struct GoalFileModel {
     // of a reference that is about WHICH board rather than which document.
     #[serde(default)]
     pub documents: Vec<String>,
+    // The releases this goal went out in, as the handles they had on the source board — `RMS-R12` — and in
+    // the order the goal lists them. Handles for the reason every other reference in these files is one: a
+    // release's number is re-issued on the way in, and a bare number here would be indistinguishable from
+    // one the receiving board has already given to something else. Each resolves against `releases.yaml`.
+    //
+    // **The link is written here because this is where the board keeps it** — a release does not know which
+    // goal it shipped — so a release in the file that no goal names is simply one nobody had attached.
+    //
+    // Defaulted: a goal exported before releases existed has no such line, and it went out in none.
+    #[serde(default)]
+    pub releases: Vec<String>,
     pub created: String,
     pub updated: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -249,4 +272,69 @@ pub struct CommentFileModel {
     pub moment: String,
     pub who: String,
     pub text_base64: String,
+}
+
+/// `releases.yaml`.
+///
+/// **A file of its own, though the only thing in an archive that points at a release is a goal.** On the
+/// board a release is a project-level record that knows nothing about goals — the goal lists what it went
+/// out in — and the file keeps that shape rather than nesting each release under the goal that lists it.
+/// Nested, a release nobody had attached yet would have nowhere to be written, and one listed by two goals
+/// would be written twice and arrive as two.
+///
+/// Optional in both directions, which is why adding it did not move [`FORMAT`] — the reasoning is there.
+#[derive(Serialize, Deserialize, Debug, Default)]
+pub struct ReleasesFile {
+    #[serde(default)]
+    pub releases: Vec<ReleaseFileModel>,
+}
+
+/// One release.
+///
+/// `id` is the handle it had on the board it came from — `RMS-R12` — and it plays the part a goal's does: it
+/// is what a goal's `releases` names it by, and it is NOT what the release is called after the import. Its
+/// number is re-issued out of the target project's counter, in the same reservation as the goals and tasks
+/// beside it, because the receiving board serves all three from one counter exactly as the source did.
+///
+/// **A deleted release is in the file**, with `deleted` saying when. A goal goes on listing a release that
+/// has been deleted, so that bringing the release back puts it on the goal again — and that arrangement
+/// only survives the crossing if the release does.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ReleaseFileModel {
+    pub id: String,
+    pub title_base64: String,
+    #[serde(default)]
+    pub description_base64: String,
+    #[serde(default)]
+    pub release_notes_base64: String,
+    // The date of the release as its author gave it. A whole moment, like every other in these files, and
+    // not a calendar day: releases are ordered by it, so one recorded with a time has to arrive with that
+    // time, or two of the same day could change places on the way.
+    pub date: String,
+    #[serde(default)]
+    pub services: Vec<ServiceReleaseFileModel>,
+    pub created: String,
+    pub updated: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted: Option<String>,
+}
+
+/// One microservice of a release: which version of it went out, and built from which commit.
+///
+/// The three identifiers are legible and the two notes are not, by the rule the rest of the archive follows.
+/// An id, a version and a hash are vocabulary — none of them can hold whitespace, let alone a newline — and
+/// they are what somebody opening this file is looking for. `settings_update_note` and `description` are
+/// prose a person wrote, so they travel base64 and say so in their names.
+///
+/// `datetime` is when this service went out, as whoever recorded the release said it.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ServiceReleaseFileModel {
+    pub microservice_id: String,
+    pub version: String,
+    pub git_hash: String,
+    pub datetime: String,
+    #[serde(default)]
+    pub settings_update_note_base64: String,
+    #[serde(default)]
+    pub description_base64: String,
 }

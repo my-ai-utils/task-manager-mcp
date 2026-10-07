@@ -320,6 +320,98 @@ date beside it, the url as the tooltip. They are the one thing on that screen th
 they open in a new tab — the board stays where it was, and the back button is not the way home from a CI
 log. Most tasks produced no builds and draw nothing at all rather than an empty heading.
 
+## Releases — the record of what went out
+
+A build link says a change was *built*. A release says a feature is **out**, and in what: which version
+of which microservice, built from which commit, and whether anything has to change in its settings. It is
+the third kind of thing on a board, beside tasks and goals, and unlike a build link it is a thing of its
+own rather than a line on a card.
+
+**A release belongs to the project, not to a goal.** Its own table, `releases`, keyed `(project_id,
+number)` exactly as a task and a goal are, with the number drawn from the same per-project counter — so
+`RMS-12`, `RMS-G12` and `RMS-R12` are never more than one real thing, a bare number still names exactly
+one, and `tasks_resolve_id` answers for all three. The handle `RMS-R12` is composed on read and is not
+stored, for the reason a task's is not: a prefix moves between projects.
+
+**One release is one feature, across however many microservices it touched.** The release carries what
+changed for a reader — `title`, `description`, `release_notes` and the `date` it went out — and
+`services` carries what was deployed, one entry per microservice:
+
+| | |
+|---|---|
+| `microservice_id` | The name the service is deployed under. The identity of the entry within its release. |
+| `version` | Which version of it went out. |
+| `git_hash` | The commit that version was built from. |
+| `datetime` | When this service went out. |
+| `settings_update_note` | What has to change in this service's settings. Empty when nothing does. |
+| `description` | Anything else worth saying about this service's part of the release. |
+
+The services ride on the release row as `jsonb`, for the reason a checklist rides on its task: adding a
+service is one atomic upsert of one row, and nothing is ever asked of them across releases that the
+in-memory board does not answer.
+
+**The goal lists its releases; the release does not know its goal.** A goal is the description of a
+feature and a release is the record of it shipping, so a goal row carries `releases` — the numbers of the
+releases it went out in — and every read of a goal hands them back whole. The link is on the goal rather
+than on the release so that a release stays a plain log entry: one written down before anybody decided
+which goal it belongs under is still a release, and it is on the Releases screen either way. Normally a
+release ships exactly one goal. **Nothing enforces that** — the same release can be put on a second
+goal's list — because a rule that guessed which of two goals a release "really" belongs to would be
+wrong exactly when it mattered. The other direction, which goals list a release, is derived on read and
+stored nowhere.
+
+**A settings change has a field of its own, and that is the reason the field exists.** Whether a service's
+settings have to change is the one fact about a release somebody *acts* on while rolling it out; a fact
+that has to be found in prose gets missed. So it is `settings_update_note` on the service it concerns and
+not a line in the notes, the folded row on the Releases screen carries a flag when any service has one,
+and the open release draws it as a block of its own under that service. Everything else goes in
+`description`.
+
+**`git_hash` has to be a hash.** 7 to 64 hex characters, lower-cased on the way in; a branch or a tag is
+refused. A version is not held to anything, and the difference is deliberate: the commit is the half of
+the entry that cannot have moved since. `main` or `v1.2.3` stored here would be a record that reads as
+precise and names nothing in particular.
+
+**A release names a microservice once.** Passing one it already has is a correction of that entry, in
+place: the version and the commit are replaced — stating them is what the call is for — and `datetime`,
+`settings_update_note` and `description` only when they are passed, so fixing a mistyped version does not
+wipe a note somebody wrote. An empty string is how a note is cleared on purpose.
+
+**Its dates are statements, not stamps — and that is the one place a caller hands this service a
+time.** A release is written down after the fact, so `date` and each service's `datetime` are what
+somebody *said*: `2026-10-07`, or `2026-10-07T14:30:00+03:00`. They are read by a parser of this
+service's own (`scripts/caller_moment.rs`) rather than by the library one that reads the transfer files,
+because that one reads the clock at fixed offsets and **ignores a zone offset entirely** — it would file
+`14:30+03:00` as 14:30 UTC, three hours off and without a word. A bare date is midnight UTC, no zone
+means UTC, and a unix timestamp is refused: a bare number does not say its unit. On the way out the two
+are RFC 3339 strings on the MCP surface — the spelling that goes in — while every stamp the server put
+on stays unix seconds; the browser draws them in UTC and says so, since a date that reads as the 6th to
+anybody west of Greenwich is a different date for the same release depending on who is looking.
+
+**The list is ordered by `date`, newest first, and has no archive window.** Not by when the record was
+written — a release recorded late, with an earlier date, belongs below the ones that went out after it.
+And nothing ages off: a board is the last few days of work, a list of releases *is* the history. That is
+why `releases_list` is capped by a `limit` where `tasks_list` is not, and why the board snapshot carries
+every release of the project while it carries only the live goals.
+
+**Deleting is a flag, and the goals are not edited.** `releases_delete` is for a release recorded by
+mistake; it leaves every list and every goal that listed it, and stays reachable by its id. The goals keep
+the number in their lists and read past it, so `deleted: false` puts the release back on them as well —
+an undo that had to remember which goals to re-attach to would not be an undo. A release that was rolled
+back is **not** deleted: it happened, and what became of it goes in its `description`.
+
+**Recording a release with a `goal` writes two rows**, the release and then the goal that now lists it,
+with no transaction around them. The order is the safe one: a crash between the two leaves a release
+nobody has attached yet, which is a legitimate state and visible on the Releases screen — the other order
+would leave a goal pointing at a number that names nothing.
+
+In the browser there is a **Releases** tab: one row per release, newest first, folded to its id, title,
+the goal it shipped (in that goal's colour), up to three `service version` chips, a settings flag when one
+is due, and the date; a click opens the services table and the notes. A filter narrows the list to one
+microservice, which puts the version of it that is out at the top. A goal's dialog shows the releases it
+went out in under its text, open, and a goal that has shipped carries a `🚀` count on the Goals screen.
+All of it read-only — a release is recorded through `/mcp`.
+
 ## Searching the board
 
 Every other read here is a **filter**: a column, a kind, an assignee, a goal. Those answer "what is in this
@@ -984,17 +1076,24 @@ so a key on one is only ever there in order to push.
 A board can be poured into another board. Two controls on the projects setup row: **Export** downloads the
 project as a zip, **Import** takes one back.
 
-**The archive is five YAML files and a folder**, and the split is the point — one file per kind of thing, so
+**The archive is six YAML files and a folder**, and the split is the point — one file per kind of thing, so
 each is readable on its own and a diff between two exports says which of them changed:
 
 ```
 project.yaml     the project's settings, plus what the archive holds
-goals.yaml       every goal
+goals.yaml       every goal, each listing the releases it went out in
 tasks.yaml       every task
 comments.yaml    every comment, on tasks and goals alike, oldest first
+releases.yaml    every release, with the services in it
 documents.yaml   what each of those files is: its ID, its path, its declared content type
 documents/       the project's documents, as themselves, at their own paths
 ```
+
+`releases.yaml` is a file of its own rather than a list nested in each goal, because that is the shape the
+board has: a release is a project-level record and the goal lists it by handle. Nested, a release nobody
+had attached would have nowhere to be written, and one listed by two goals would arrive as two. It is
+optional in both directions — an archive made before releases existed has none and imports as a board with
+none, which is why adding it did not move the format version.
 
 `comments.yaml` being its own file rather than a list nested in each card is what makes an export worth
 opening: it is the project's whole conversation in the order it happened.
@@ -1015,6 +1114,12 @@ out next. That is why `goal: TM-G7` and `depends_on: [TM-4]` are spelled the way
 number would be indistinguishable from one this board already uses, and a handle can be checked. A reference
 to something the archive does not carry drops the edge and is reported — the work is real, and the grouping
 is not worth losing it over.
+
+A release is renumbered the same way and out of the same reservation, since the receiving board serves
+tasks, goals and releases from one counter exactly as the source did — and a goal's `releases: [TM-R12]` is
+remapped onto the new numbers. A **deleted** release is carried too, still listed by its goals: a goal goes
+on listing a release that has been deleted so that bringing it back puts it on the goal again, and that only
+holds on the other board if the release is there to bring back.
 
 **A document is the exception: its ID crosses with it, and that is what `documents.yaml` is for.** A card
 names a document by a reference — `raw/TM/document/<id>` — so the only part that has to be remapped is the
@@ -1329,6 +1434,12 @@ Tools:
 - `users_list` — who exists, with email and name. This is how a spoken first name becomes the
   email that goes into `assignee`.
 - `tasks_list` / `tasks_create` / `tasks_update` / `tasks_delete`
+- `releases_list` / `releases_create` / `releases_update` / `releases_delete` — what went out, and in
+  which version of which microservice. `releases_create` takes the `goal` the release ships and attaches
+  it in the same call; a release recorded without one is attached later with `add_releases` on
+  `goals_update`, which is also where one is detached — the goal lists its releases, so the link is the
+  goal's to change. `releases_list` filters by `goal` or by `microservice_id`, newest first, and is capped
+  by `limit` because nothing ages off it. See [Releases](#releases--the-record-of-what-went-out).
 - `tasks_search` — the board and its threads, by what was written on them. The counterpart to
   `tasks_list`: that one answers "what is in this column", this one answers "where did we discuss
   this". **It is the only way to see inside a comment thread without already knowing which card to
@@ -1366,7 +1477,9 @@ Tools:
   current id), and the **archived** ones — every project that used to hold `RMS`, whether task 42
   exists there, and what that task is called *today*. Without this the cost of a reusable prefix
   would be unrecoverable: someone quoting an id from an old chat would land on a different task and
-  never know. With it, the tool says "`RMS-42` is now this, and it used to mean that".
+  never know. With it, the tool says "`RMS-42` is now this, and it used to mean that". It answers for a
+  goal (`RMS-G7`) and a release (`RMS-R7`) the same way, and for a bare number whichever of the three it
+  turned out to be — which is also how a deleted release is read back, since it is in no listing.
 
 Every tool's description is written as a **use case** — when to call it and why — not as a list of
 its fields. That is what made the original board's prompt work, and it is the part worth copying.
@@ -1399,6 +1512,7 @@ next build.
 | Area | |
 |---|---|
 | **Home** (root URL) | The board. A project dropdown on top — only projects you may see, and not archived ones unless the archived board is the one currently open; an admin sees all — and the choice is remembered in `localStorage`. Filters by task type and by assignee, plus a search box: free text narrows the board in place, while a task id (`RMS-42`) is looked up on the server and opens as a card, because the answer may be on another board or closed longer than seven days ago and therefore not drawn at all. **Read-only:** nothing is edited with a mouse, anywhere. |
+| **Releases** | What has gone out, newest first: one row per release, folded to a line and opened to read the services — version, commit, when — and the notes. A flag on the row says a service in it needs its settings changed. Filtered by microservice. **Read-only**, like the board: a release is recorded through `/mcp`. |
 | **Projects setup** | Every project as one row — prefix, name, description, task count, which column template it follows, its task types, how many members. Editing is by dialog: **Edit** for what a project *is* (name, description, prefix, and which column template), then **Task types**, **Members**, and **GitHub** — which is where a repository is connected, and the only place it can be: a connection is configuration, so no MCP tool creates one. **Archive** puts a project away and is the row action that is not a dialog — nothing is destroyed and the same button brings it back, so a confirm step would only teach people to click through confirms. Archived projects are hidden here too until **Show archived** is pressed, and then carry an `archived` label beside their prefix. This screen is the only place one can be seen and brought back. Admin only. |
 | **Users** | The roster. Admin only. |
 | **Settings** | A menu of areas on the left, the chosen one on the right, with the area in the route (`/settings/column-templates`) so each is linkable and Back works between them. **Column templates** is where a board's columns are configured. **Diagnostics** is read-only: which `client_id` was picked up, which `redirect_uri` is expected, how many admins the settings list holds — the first thing worth reading when a sign-in fails. |

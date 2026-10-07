@@ -45,6 +45,13 @@ pub struct GoalResponse {
     pub documents: Vec<String>,
     #[serde(default)]
     pub subtasks: Vec<crate::subtasks::SubtaskResponse>,
+    // The releases this goal went out in, newest first — whole, not ids. A goal is the description of a
+    // feature and a release is the record of it shipping, so this is the answer to "is it out, and in
+    // which version of what". THIS link lives on the goal: it stores the numbers, and the releases
+    // themselves are a project-level thing, read back here on every response. One that has since been
+    // deleted is simply not in the list.
+    #[serde(default)]
+    pub releases: Vec<crate::releases::ReleaseResponse>,
     #[serde(default)]
     pub comments: Vec<TaskCommentResponse>,
     pub created_unix_seconds: i64,

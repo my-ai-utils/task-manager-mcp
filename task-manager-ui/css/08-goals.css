@@ -175,13 +175,14 @@
   background: var(--accent);
 }
 
-/* The thread count and the document count are one pair and are styled as one: two sizes or two colours
-   here would read as two different kinds of thing, when they are the same kind of hint.
+/* The thread count, the document count and the release count are one family and are styled as one: two
+   sizes or two colours here would read as different kinds of thing, when they are the same kind of hint.
 
    Neither widens the card. `.goal-meta` does not shrink and `.goal-name` already ellipsises, so what a
    badge costs is a few pixels off where a long title is cut — not a wider row. */
 .goal-comments,
-.goal-documents {
+.goal-documents,
+.goal-releases {
   font-size: 12px;
   color: var(--text-muted);
   flex-shrink: 0;

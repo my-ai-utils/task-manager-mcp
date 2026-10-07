@@ -34,7 +34,7 @@ struct PickedFile {
 /// find that out before it happens rather than after.
 ///
 /// What it does not do is validate the archive. That is the server's job and it does it properly — the format
-/// marker, the four files, every path — and doing half of it here would mean two answers to one question, of
+/// marker, the files in it, every path — and doing half of it here would mean two answers to one question, of
 /// which one is always the wrong one. All that is checked here is that a file was chosen, plus the name-based
 /// zip test that is only there to catch the obvious slip early.
 #[component]

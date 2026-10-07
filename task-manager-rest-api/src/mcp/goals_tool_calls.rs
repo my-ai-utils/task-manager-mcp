@@ -216,6 +216,14 @@ pub struct GoalsUpdateInput {
     )]
     pub remove_documents: Option<Vec<String>>,
     #[property(
+        description = "Releases this goal went out in, by id — `RMS-R12`, from releases_list — or by bare number. Added to whatever it already lists. This is how a release recorded without a `goal` is put on the goal it shipped. Each must be a live release of THIS project: one that does not exist is refused, and so is a deleted one"
+    )]
+    pub add_releases: Option<Vec<String>>,
+    #[property(
+        description = "Releases to take off this goal, by id or bare number. Applied after add_releases. Detaching is not deleting — the release is untouched and stays in releases_list, only this goal stops listing it"
+    )]
+    pub remove_releases: Option<Vec<String>>,
+    #[property(
         description = "Pass false to UNDELETE a goal somebody removed. Pass true to delete it, which goals_delete also does. Omit to leave it alone"
     )]
     pub deleted: Option<bool>,
@@ -278,6 +286,11 @@ impl McpToolCall<GoalsUpdateInput, GoalWriteResponse> for GoalsUpdateHandler {
                 documents: crate::mcp::DocumentOps {
                     add: model.add_documents,
                     remove: model.remove_documents,
+                }
+                .into_patch(),
+                releases: crate::mcp::ReleaseOps {
+                    add: model.add_releases,
+                    remove: model.remove_releases,
                 }
                 .into_patch(),
                 deleted: model.deleted,

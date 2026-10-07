@@ -5,7 +5,8 @@ use ahash::{AHashMap, AHashSet};
 use rust_extensions::date_time::DateTimeAsMicroseconds;
 
 use super::models::{
-    ColumnTemplateModel, GoalModel, KindTemplateModel, ProjectModel, TaskModel, UserModel,
+    ColumnTemplateModel, GoalModel, KindTemplateModel, ProjectModel, ReleaseModel, TaskModel,
+    UserModel,
 };
 
 /// How long finished work stays on the board before it counts as archived, when a project has not said
@@ -44,6 +45,9 @@ pub struct BoardInner {
     /// same way a task is and every lookup arrives with the project already in hand: a task names its
     /// goal by number alone, and the number only means anything within its own project.
     goals: AHashMap<String, AHashMap<i64, Arc<GoalModel>>>,
+    /// project id -> release number -> release. The same nesting for the same reason: a goal names its
+    /// releases by number alone, and that number only means anything within the goal's own project.
+    releases: AHashMap<String, AHashMap<i64, Arc<ReleaseModel>>>,
     /// project id -> task number -> task.
     tasks: AHashMap<String, AHashMap<i64, Arc<TaskModel>>>,
     /// Lower-cased email -> user.
@@ -64,6 +68,7 @@ impl BoardInner {
             prefix_index: AHashMap::new(),
             historical_prefix_index: AHashMap::new(),
             goals: AHashMap::new(),
+            releases: AHashMap::new(),
             tasks: AHashMap::new(),
             users: AHashMap::new(),
             projects_list: Arc::new(Vec::new()),
@@ -76,14 +81,15 @@ impl BoardInner {
     /// Build a snapshot out of what the startup load read from Postgres.
     ///
     /// The one place the counter invariant lives: each project's `last_task_number` is floored at the
-    /// highest number any of its surviving tasks **or goals** carries. A counter row that is missing or
-    /// has fallen behind therefore cannot re-issue a live number — and since the floor is computed from
-    /// the rows that actually exist, a number lost to a crash before its row was written is simply
-    /// never used.
+    /// highest number any of its surviving tasks, **goals or releases** carries. A counter row that is
+    /// missing or has fallen behind therefore cannot re-issue a live number — and since the floor is
+    /// computed from the rows that actually exist, a number lost to a crash before its row was written is
+    /// simply never used.
     ///
-    /// Goals count towards that floor because they draw from the same counter. Leaving them out would let
-    /// a behind counter hand a task the number a goal already has, and then `RMS-7` and `RMS-G7` would
-    /// both exist — which is the one assumption everything else here is built on.
+    /// Goals and releases count towards that floor because they draw from the same counter. Leaving either
+    /// out would let a behind counter hand a task the number one of them already has, and then `RMS-7` and
+    /// `RMS-G7` — or `RMS-R7` — would both exist, which is the one assumption everything else here is
+    /// built on.
     ///
     /// A task whose project is gone is dropped: there is nothing to compose its handle from and no
     /// board to draw it on. That cannot happen while project deletion is unimplemented, which is
@@ -95,6 +101,7 @@ impl BoardInner {
         column_templates: Vec<ColumnTemplateModel>,
         kind_templates: Vec<KindTemplateModel>,
         goals: Vec<GoalModel>,
+        releases: Vec<ReleaseModel>,
     ) -> Self {
         let mut result = Self::new();
 
@@ -124,8 +131,21 @@ impl BoardInner {
             }
         }
 
+        for release in &releases {
+            let entry = highest_number
+                .entry(release.project_id.clone())
+                .or_insert(0);
+            if release.number > *entry {
+                *entry = release.number;
+            }
+        }
+
         for goal in goals {
             result.put_goal(Arc::new(goal));
+        }
+
+        for release in releases {
+            result.put_release(Arc::new(release));
         }
 
         for mut project in projects {
@@ -182,13 +202,19 @@ impl BoardInner {
             .insert(goal.number, goal);
     }
 
+    pub(super) fn put_release(&mut self, release: Arc<ReleaseModel>) {
+        self.releases
+            .entry(release.project_id.clone())
+            .or_default()
+            .insert(release.number, release);
+    }
+
     pub(super) fn put_task(&mut self, task: Arc<TaskModel>) {
         self.tasks
             .entry(task.project_id.clone())
             .or_default()
             .insert(task.number, task);
     }
-
 
     pub(super) fn put_user(&mut self, user: Arc<UserModel>) {
         self.users.insert(user.email.clone(), user);
@@ -375,6 +401,101 @@ impl BoardInner {
             .collect();
 
         result.sort_by_key(|itm| (itm.priority.order(), itm.number));
+        result
+    }
+
+    /// One release — **`None` for a deleted one**, the same forgetting [`Self::get_goal`] does and for the
+    /// same reason: every read that goes through here stops seeing it, so a goal that lists a deleted
+    /// release simply shows one fewer. Resolving an id somebody quoted is the one caller that must not
+    /// forget, and it has its own door: [`Self::get_release_including_deleted`].
+    pub fn get_release(&self, project_id: &str, number: i64) -> Option<Arc<ReleaseModel>> {
+        let release = self.releases.get(project_id)?.get(&number)?;
+
+        if release.is_deleted() {
+            return None;
+        }
+
+        Some(release.clone())
+    }
+
+    /// One release, deleted or not — for the tools that act on a release by its id. Undeleting one has to
+    /// be able to find it, and an id that came back as "no such release" would read as a typo.
+    pub fn get_release_including_deleted(
+        &self,
+        project_id: &str,
+        number: i64,
+    ) -> Option<Arc<ReleaseModel>> {
+        self.releases.get(project_id)?.get(&number).cloned()
+    }
+
+    /// A project's releases, **newest first** — by the date of the release, not by when it was written
+    /// down, and by number within one date so the order is total.
+    ///
+    /// Newest first because that is the question a list of releases is asked: what went out last. Unlike
+    /// goals and tasks there is no archive window here — a release does not age off, the list IS the
+    /// history.
+    pub fn releases_of_project(&self, project_id: &str) -> Vec<Arc<ReleaseModel>> {
+        let Some(of_project) = self.releases.get(project_id) else {
+            return Vec::new();
+        };
+
+        let mut result: Vec<Arc<ReleaseModel>> = of_project
+            .values()
+            .filter(|release| !release.is_deleted())
+            .cloned()
+            .collect();
+
+        sort_newest_first(&mut result);
+        result
+    }
+
+    /// A project's releases, deleted ones included, in no particular order. One caller, the export, for
+    /// the reason given on [`Self::goals_of_project_including_deleted`].
+    pub fn releases_of_project_including_deleted(
+        &self,
+        project_id: &str,
+    ) -> Vec<Arc<ReleaseModel>> {
+        let Some(of_project) = self.releases.get(project_id) else {
+            return Vec::new();
+        };
+
+        of_project.values().cloned().collect()
+    }
+
+    /// The releases a goal went out in, newest first — the same order the whole list is in, so a goal's
+    /// dialog and the Releases screen never disagree about which came last.
+    ///
+    /// A number naming no release, or a deleted one, is skipped rather than reported: the stored list is
+    /// left alone, so undeleting the release puts it back on the goal. The same leniency a task's goal
+    /// gets from [`Self::effective_goal`].
+    pub fn releases_of_goal(&self, goal: &GoalModel) -> Vec<Arc<ReleaseModel>> {
+        let mut result: Vec<Arc<ReleaseModel>> = goal
+            .releases
+            .iter()
+            .filter_map(|number| self.get_release(&goal.project_id, *number))
+            .collect();
+
+        sort_newest_first(&mut result);
+        result
+    }
+
+    /// The reverse edge: the goals that list this release, by number.
+    ///
+    /// Nothing stores this — a release does not know what it shipped, the goal says so. Normally one
+    /// goal; none for a release nobody has attached yet, and more than one is allowed without meaning
+    /// much. A deleted goal is not counted, since nothing can open it.
+    pub fn goals_of_release(&self, project_id: &str, number: i64) -> Vec<Arc<GoalModel>> {
+        let Some(of_project) = self.goals.get(project_id) else {
+            return Vec::new();
+        };
+
+        let mut result: Vec<Arc<GoalModel>> = of_project
+            .values()
+            .filter(|goal| !goal.is_deleted() && goal.releases.contains(&number))
+            .cloned()
+            .collect();
+
+        result.sort_by_key(|itm| itm.number);
         result
     }
 
@@ -704,4 +825,18 @@ impl Default for BoardInner {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Newest release first, by its date; the higher number first within one date.
+///
+/// One function for the two lists of releases there are, which is what keeps them in the same order. The
+/// number breaks a tie because several releases recorded with a bare date all land on the same midnight,
+/// and a later number is the one written down later.
+fn sort_newest_first(releases: &mut [Arc<ReleaseModel>]) {
+    releases.sort_by_key(|itm| {
+        (
+            std::cmp::Reverse(itm.date.unix_microseconds),
+            std::cmp::Reverse(itm.number),
+        )
+    });
 }

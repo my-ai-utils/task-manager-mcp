@@ -1,6 +1,7 @@
 use dioxus::prelude::*;
 use task_manager_shared::goals::GoalResponse;
 use task_manager_shared::kind_color::KindColor;
+use task_manager_shared::releases::moment_for_display;
 
 /// One goal, shown in full: what it is about, and what has been said about it.
 ///
@@ -49,6 +50,8 @@ fn render_goal(goal: &GoalResponse, status: &str) -> Element {
                     if !goal.subtasks.is_empty() {
                         super::Checklist { items: goal.subtasks.clone() }
                     }
+
+                    {render_releases(goal)}
                 }
                 {render_attributes(goal, status)}
             }
@@ -106,11 +109,67 @@ fn render_attributes(goal: &GoalResponse, status: &str) -> Element {
                 super::DocumentRefs { project: goal.project.clone(), ids: goal.documents.clone() }
             }
 
+            // The newest one only, as a fact to look up beside the progress: "8 of 8 done" says the work
+            // is finished and this says it is out, which are not the same thing. The releases themselves
+            // are under the text, where there is room to read them.
+            if let Some(latest) = goal.releases.first() {
+                div { class: "task-view-attr",
+                    div { class: "task-view-attr-label", "Released" }
+                    div {
+                        span { class: "goal-id", "{latest.id}" }
+                        " {moment_for_display(latest.date_unix_seconds)}"
+                    }
+                }
+            }
+
             if closed {
                 div { class: "task-view-attr",
                     div { class: "task-view-attr-label", "Closed" }
                     div {
                         "The resolution is the last comment below."
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The releases this goal went out in, newest first, each one open.
+///
+/// Open rather than folded, unlike the Releases screen: there that screen is a history to scan, and here
+/// it is the answer to "what shipped for THIS" — usually one release, and making the reader unfold the
+/// only row on the page would be a click for nothing.
+///
+/// Nothing at all when the goal has not shipped. Most goals on screen are still being worked on, and an
+/// empty "Releases" heading on every one of them would read as something missing.
+fn render_releases(goal: &GoalResponse) -> Element {
+    if goal.releases.is_empty() {
+        return rsx! {};
+    }
+
+    rsx! {
+        div { class: "task-view-releases",
+            div { class: "task-view-checklist-header",
+                "Releases"
+                span { class: "board-column-count", "{goal.releases.len()}" }
+            }
+
+            for release in goal.releases.iter() {
+                div { class: "release-card", key: "{release.id}",
+                    div { class: "release-head static",
+                        div { class: "release-head-text",
+                            span { class: "goal-id", "{release.id}" }
+                            div { class: "release-title", "{release.title}" }
+                        }
+                        div { class: "release-meta",
+                            super::ReleaseSettingsFlag { release: release.clone() }
+                            span { class: "release-date",
+                                "{moment_for_display(release.date_unix_seconds)}"
+                            }
+                        }
+                    }
+                    div { class: "release-body",
+                        super::ReleaseDetails { release: release.clone() }
                     }
                 }
             }

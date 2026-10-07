@@ -126,15 +126,12 @@ fn found_goal(
             .into_ok_result(true);
     }
 
-    let (tasks_amount, done_amount) = board.goal_progress(&found.project.id, found.goal.number);
-
     HttpOutput::as_json(FindTaskResponse {
         task: None,
         goal: Some(crate::mappers::goal_to_response(
             &found.goal,
-            &found.project.prefix,
-            tasks_amount,
-            done_amount,
+            &found.project,
+            board,
         )),
         project: found.project.prefix.clone(),
         project_name: found.project.name.clone(),

@@ -1,0 +1,324 @@
+/* Releases: the record of what went out, on its own screen and under the goal it shipped.
+   One set of rules for both places, because it is one thing drawn twice — the body of a release on the
+   Releases screen and the body of the same release in a goal's dialog are the same component, and two
+   stylesheets for it would drift the first time a column was added. */
+
+.releases-page {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.releases-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* The same card a goal is drawn in, deliberately: the two screens sit one tab apart and list the same
+   work from two ends. */
+.release-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+  overflow: hidden;
+}
+
+.release-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+  /* The whole row is a click target, and a click on a row of text otherwise selects it. */
+  user-select: none;
+}
+
+.release-head:hover {
+  background: var(--surface-2);
+}
+
+/* Under a goal the release is already open and stays open, so its head is a heading and not a control:
+   no pointer, no hover, and the text selectable again — the id is there to be copied. */
+.release-head.static {
+  cursor: default;
+  user-select: text;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+}
+
+/* Takes the slack, so the meta block lines up down the list however long the titles are. Baseline, so the
+   smaller monospace id sits on the line the title is written on. */
+.release-head-text {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+/* `min-width: 0` on the child that is allowed to shrink — without it a long title refuses to go below its
+   content width and pushes the meta block off the card. */
+.release-title {
+  font-weight: 600;
+  color: var(--text);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Does not shrink as a block, but everything inside it that carries a NAME does: a service or a goal with
+   a long name is clipped rather than allowed to push the date out of its column. */
+.release-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  max-width: 70%;
+  min-width: 0;
+}
+
+/* The goal a release shipped, edged in that goal's own colour — the colour comes inline, off the goal.
+   It is how a row of releases is read as "which feature was that" without opening one. */
+.release-goal {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  border-left: 3px solid var(--border-strong);
+  padding-left: 6px;
+  font-size: 12px;
+  color: var(--text-muted);
+  min-width: 0;
+}
+
+.release-goal-name {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* A service and the version of it that went out, as one chip in two halves: the name muted and the
+   version in the body colour, since the version is what the eye is looking for. */
+.release-service-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  font-size: 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1px 8px;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.release-service-chip-name {
+  color: var(--text-muted);
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.release-service-chip-version {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--text);
+}
+
+.release-more {
+  font-size: 12px;
+  color: var(--text-faint);
+  cursor: help;
+}
+
+/* The one badge on this screen that asks somebody to DO something, so it is the one drawn in a warning
+   colour: a service in this release needs its settings changed. Amber rather than the red of `--danger` —
+   nothing is wrong, something is required. */
+.release-settings-flag {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #8a5a00;
+  background: #fff4d6;
+  border: 1px solid #f0c75e;
+  border-radius: 10px;
+  padding: 1px 7px;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+/* Tabular figures and a fixed minimum, so a column of dates lines up down the list and can be read as a
+   timeline rather than as a ragged edge. */
+.release-date {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  min-width: 76px;
+  text-align: right;
+  flex-shrink: 0;
+}
+
+.release-body {
+  border-top: 1px solid var(--border);
+  padding: 12px 14px 14px 14px;
+}
+
+/* Under a static head the rule is already drawn by the head. */
+.release-head.static + .release-body {
+  border-top: none;
+}
+
+.release-details {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.release-text {
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+/* The small caps label this stylesheet uses for every "what is this block" — the same face as the
+   attribute labels in the dialogs, so a release reads as part of the same product. */
+.release-note-label {
+  color: var(--text-faint);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  margin-bottom: 3px;
+}
+
+/* The services of a release. A real table, because it is one: the same four facts about each service,
+   compared down a column. `table-layout: auto` and a hash that may break, so the commit — the one long
+   value here — wraps inside its own cell instead of widening the table past the card. */
+.release-services {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.release-services th {
+  text-align: left;
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-faint);
+  padding: 0 10px 5px 0;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.release-services td {
+  padding: 6px 10px 6px 0;
+  vertical-align: top;
+}
+
+/* One rule per SERVICE rather than per row: a service is its line plus the notes under it, and a rule
+   between the two would cut a note off from the service it is about. */
+.release-services tbody + tbody tr:first-child td {
+  border-top: 1px solid var(--border);
+}
+
+.release-service-id {
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.release-service-version,
+.release-service-hash {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.release-service-version {
+  white-space: nowrap;
+}
+
+/* Whole, and allowed to break anywhere: it is copied, not read, and half of it in a tooltip could not be. */
+.release-service-hash {
+  color: var(--text-muted);
+  word-break: break-all;
+}
+
+.release-service-moment {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* What has to change in a service's settings. The same amber as the flag on the folded row, so the badge
+   that says "there is one" and the block that says what it is are visibly the same statement — and an
+   edge down its left, so it reads as attached to the service above it rather than as a row of its own. */
+.release-service-settings td {
+  padding-top: 0;
+}
+
+.release-service-settings td > div:last-child,
+.release-service-settings .release-note-label {
+  background: #fff9e8;
+  border-left: 3px solid #f0c75e;
+  padding-left: 9px;
+  padding-right: 9px;
+}
+
+.release-service-settings .release-note-label {
+  color: #8a5a00;
+  margin-bottom: 0;
+  padding-top: 5px;
+  border-radius: 0 var(--radius) 0 0;
+}
+
+.release-service-settings td > div:last-child {
+  padding-top: 2px;
+  padding-bottom: 6px;
+  border-radius: 0 0 var(--radius) 0;
+}
+
+/* Everything else somebody said about a service's part of the release: quieter than the line above it,
+   and nothing like the settings block — this is read, that is acted on. */
+.release-service-description td {
+  padding-top: 0;
+  color: var(--text-muted);
+}
+
+/* The releases of a goal, in its dialog. Separated from what is above by a rule rather than boxed, the
+   way the checklist is: they are part of the same goal, not a panel about it. */
+.task-view-releases {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* No shadow inside a dialog: the dialog is already the raised surface, and a card lifted off it again is
+   one layer more than there is. */
+.task-view-releases .release-card {
+  box-shadow: none;
+  /* This block is a flex column too, and a card has `overflow: hidden` for its rounded corners — which,
+     as with `.task-view-left`, takes away the minimum height that would stop it being squeezed. */
+  flex-shrink: 0;
+}
+
+/* Narrow: the meta block goes under the title instead of fighting it for one line. */
+@media (max-width: 900px) {
+  .release-head {
+    flex-wrap: wrap;
+  }
+
+  .release-meta {
+    max-width: 100%;
+    flex-wrap: wrap;
+    /* Lined up under the title, past the caret. */
+    margin-left: 20px;
+  }
+
+  .release-head.static .release-meta {
+    margin-left: 0;
+  }
+}

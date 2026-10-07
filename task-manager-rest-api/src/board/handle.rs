@@ -54,6 +54,32 @@ pub fn compose_goal_handle(prefix: &str, number: i64) -> String {
 /// without saying what kind of thing it is, and since one counter serves both, deciding what that number
 /// means is a lookup, not a parse: see [`parse_task_handle`], then try the goal with the number it gives.
 pub fn parse_goal_handle(src: &str) -> Option<ParsedTaskHandle> {
+    parse_marked_handle(src, GOAL_MARKER)
+}
+
+/// The letter that marks a release inside a handle: `RMS-R7`.
+///
+/// The third kind of thing to draw from the project's one counter, and marked for the same reason a goal
+/// is: the number is unique across all three, so the letter is not part of the identity — it says what the
+/// number names.
+const RELEASE_MARKER: char = 'R';
+
+/// Build the handle a person sees for a release: `RMS` + 7 -> `RMS-R7`.
+pub fn compose_release_handle(prefix: &str, number: i64) -> String {
+    format!("{prefix}-{RELEASE_MARKER}{number}")
+}
+
+/// Split `RMS-R7` / `rms-r7` into its prefix and number.
+///
+/// `None` for anything that is not a release handle, a task's and a goal's included — the same rule
+/// [`parse_goal_handle`] holds to, and for the same reason: a tool asked to change a release must not act
+/// on something else because of a letter.
+pub fn parse_release_handle(src: &str) -> Option<ParsedTaskHandle> {
+    parse_marked_handle(src, RELEASE_MARKER)
+}
+
+/// The shared half of the two marked spellings: a valid prefix, the marker, then digits and nothing else.
+fn parse_marked_handle(src: &str, marker: char) -> Option<ParsedTaskHandle> {
     let (prefix, marked_number) = src.trim().rsplit_once('-')?;
 
     let prefix = prefix.trim();
@@ -65,7 +91,7 @@ pub fn parse_goal_handle(src: &str) -> Option<ParsedTaskHandle> {
 
     let mut chars = marked_number.chars();
 
-    if !chars.next()?.eq_ignore_ascii_case(&GOAL_MARKER) {
+    if !chars.next()?.eq_ignore_ascii_case(&marker) {
         return None;
     }
 
@@ -224,6 +250,37 @@ mod tests {
     fn the_two_handle_kinds_do_not_parse_as_each_other() {
         assert_eq!(parse_task_handle("RMS-G7"), None);
         assert_eq!(parse_goal_handle("RMS-7"), None);
+    }
+
+    #[test]
+    fn a_release_handle_round_trips_in_either_case() {
+        assert_eq!(compose_release_handle("RMS", 12), "RMS-R12");
+
+        for src in ["RMS-R12", "  rms-r12 "] {
+            assert_eq!(
+                parse_release_handle(src),
+                Some(ParsedTaskHandle {
+                    prefix: "RMS".to_string(),
+                    number: 12,
+                }),
+                "{src:?} should parse"
+            );
+        }
+    }
+
+    /// Three kinds of thing share one counter, so the marker is the ONLY thing that says which one a handle
+    /// names. A parser that accepted another kind's spelling would hand back a number that is real — it
+    /// names something — and nothing downstream could tell it had the wrong thing.
+    #[test]
+    fn a_release_handle_is_neither_a_task_nor_a_goal() {
+        assert_eq!(parse_task_handle("RMS-R7"), None);
+        assert_eq!(parse_goal_handle("RMS-R7"), None);
+        assert_eq!(parse_release_handle("RMS-7"), None);
+        assert_eq!(parse_release_handle("RMS-G7"), None);
+
+        for src in ["RMS-R", "RMS-R0", "RMS-RR7", "RMS-R7x", "RMS-R-7"] {
+            assert_eq!(parse_release_handle(src), None, "{src:?} should not parse");
+        }
     }
 
     #[test]

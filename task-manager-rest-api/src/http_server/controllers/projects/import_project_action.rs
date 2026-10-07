@@ -15,7 +15,7 @@ use_my_http_server!();
     route: "/api/projects/v1/import",
     controller: "Projects",
     summary: "Pour an exported project into this one",
-    description: "The other half of /api/projects/v1/export: the zip goes up as the raw body, and everything in it is added to the project named in the query. ADDITIVE — nothing already on this board is touched or removed; goals and tasks arrive alongside what is there, taking fresh numbers out of this project's own counter, and every reference inside the file is remapped to them: a task's goal, its dependencies, and the target of every comment. Comments keep their own author and moment rather than being re-signed by whoever pressed Import. A document lands at its path, and one already at that path gets a NEW VERSION of itself, keeping its id and its whole history. THE PROJECT'S SETTINGS ARE REPLACED with the file's — name, description, archive window and the two template ids — because the statuses in the file are the source board's column ids and mean nothing unless this project follows the same template; a template that is not on this instance, or a prefix another project holds, is left alone and reported in `notes`. PARTIAL BY DESIGN: an entry that cannot be written comes back in `skipped` with a reason and the rest still arrives. Admin only.",
+    description: "The other half of /api/projects/v1/export: the zip goes up as the raw body, and everything in it is added to the project named in the query. ADDITIVE — nothing already on this board is touched or removed; goals, tasks and releases arrive alongside what is there, taking fresh numbers out of this project's own counter, and every reference inside the file is remapped to them: a task's goal, its dependencies, the releases a goal lists, and the target of every comment. Comments keep their own author and moment rather than being re-signed by whoever pressed Import. A document lands at its path, and one already at that path gets a NEW VERSION of itself, keeping its id and its whole history. THE PROJECT'S SETTINGS ARE REPLACED with the file's — name, description, archive window and the two template ids — because the statuses in the file are the source board's column ids and mean nothing unless this project follows the same template; a template that is not on this instance, or a prefix another project holds, is left alone and reported in `notes`. PARTIAL BY DESIGN: an entry that cannot be written comes back in `skipped` with a reason and the rest still arrives. Admin only.",
     input_data: "ImportProjectInputModel",
     result: [
         {status_code: 200, description: "What landed, what did not, and what reads differently here", model: "ImportProjectResponse"},
@@ -72,6 +72,7 @@ async fn handle_request(
         tasks: outcome.tasks as i32,
         comments: outcome.comments as i32,
         documents: outcome.documents as i32,
+        releases: outcome.releases as i32,
         skipped: outcome
             .skipped
             .into_iter()

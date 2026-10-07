@@ -11,19 +11,24 @@ use task_manager_shared::priority::Priority;
 
 use crate::app::AppContext;
 use crate::board::{
-    CommentModel, GhActionModel, GoalModel, ProjectModel, SubtaskModel, TaskModel,
-    parse_goal_handle, parse_task_handle,
+    Board, CommentModel, GhActionModel, GoalModel, ProjectModel, ReleaseModel, ServiceReleaseModel,
+    SubtaskModel, TaskModel, parse_goal_handle, parse_release_handle, parse_task_handle,
 };
-use crate::postgres::{GoalDto, TaskDto};
+use crate::postgres::{GoalDto, ReleaseDto, TaskDto};
 
 use super::models::*;
 
-/// The most one import may write, counted in goals plus tasks.
+/// The most one import may write, counted in goals, tasks and releases together.
 ///
 /// Not a technical ceiling — it is the point past which one HTTP request is the wrong shape for the job.
 /// Every card is a Postgres upsert, written one after another inside a single request, and there is no undo:
 /// an import that ran for four minutes and then timed out would leave a board half-poured with nothing to
 /// roll it back. A real board is a fraction of this.
+///
+/// **A release counts, though nobody would call it a card**, because what this caps is the upserts and not
+/// the kind of thing behind them: a release is one more row written in that same request, and one more
+/// number out of the same reservation. Left out, a project with a long release history would be the one
+/// import this does not bound.
 pub const MAX_IMPORT_CARDS: usize = 2_000;
 
 /// The most an import archive may be, decoded.
@@ -52,6 +57,7 @@ pub struct ImportOutcome {
     pub tasks: usize,
     pub comments: usize,
     pub documents: usize,
+    pub releases: usize,
     pub skipped: Vec<SkippedImport>,
     pub notes: Vec<String>,
 }
@@ -61,18 +67,19 @@ pub struct ImportOutcome {
 /// **Numbers are re-issued, and that is the one thing this cannot preserve.** A task is identified by
 /// `(project, number)` out of the receiving project's own counter, so `TM-42` from the file lands as whatever
 /// this board's counter hands out next. Every reference inside the file is therefore remapped: a task's goal,
-/// its dependencies, and the target of every comment. That is why the file spells them as handles — a bare
-/// number would be indistinguishable from one this board already uses.
+/// its dependencies, the releases a goal lists, and the target of every comment. That is why the file spells
+/// them as handles — a bare number would be indistinguishable from one this board already uses.
 ///
 /// **Everything else is kept as it was**: text, status, priority, kind, assignee, labels, checklists, build
 /// links, the created / updated / closed / deleted moments, and every comment with its own author and moment.
 /// A comment is not re-signed by whoever pressed Import — the thread is a record of who said what, and
-/// rewriting it would be a lie about the past.
+/// rewriting it would be a lie about the past. A release is kept whole for the same reason: its date and the
+/// moment each service went out are what somebody SAID happened, and neither is restamped with today.
 ///
-/// **Nothing on this board is touched except its settings.** Import only ever adds cards; the tasks already
-/// here keep their numbers and are not looked at. The settings ARE replaced, because the statuses in the file
-/// are the source board's column ids and mean nothing unless this project follows the same template — see
-/// [`super::models::ProjectFile`].
+/// **Nothing on this board is touched except its settings.** Import only ever adds — cards, and the releases
+/// they went out in; the tasks already here keep their numbers and are not looked at. The settings ARE
+/// replaced, because the statuses in the file are the source board's column ids and mean nothing unless this
+/// project follows the same template — see [`super::models::ProjectFile`].
 ///
 /// **Partial by design**, like every archive on this API: an entry that cannot be written comes back in
 /// `skipped` with a reason, and the rest still arrives.
@@ -116,12 +123,15 @@ pub async fn import_project(
     let goals_file = archive.read_yaml_or_default::<GoalsFile>(GOALS_FILE)?;
     let tasks_file = archive.read_yaml_or_default::<TasksFile>(TASKS_FILE)?;
     let comments_file = archive.read_yaml_or_default::<CommentsFile>(COMMENTS_FILE)?;
+    // Missing from every archive made before releases existed, and that has to read as a board with none
+    // rather than as a file that is not an export.
+    let releases_file = archive.read_yaml_or_default::<ReleasesFile>(RELEASES_FILE)?;
 
-    let cards = goals_file.goals.len() + tasks_file.tasks.len();
+    let cards = goals_file.goals.len() + tasks_file.tasks.len() + releases_file.releases.len();
 
     if cards > MAX_IMPORT_CARDS {
         return Err(format!(
-            "this archive holds {cards} goals and tasks, and the limit for one import is {MAX_IMPORT_CARDS}"
+            "this archive holds {cards} goals, tasks and releases, and the limit for one import is {MAX_IMPORT_CARDS}"
         ));
     }
 
@@ -141,14 +151,31 @@ pub async fn import_project(
 
     // Then the numbers — every one of them, before a single card is built. A task's goal and its dependencies
     // can name anything in the file, including something further down it, so the whole map has to exist first.
-    let numbers = Numbering::reserve(app, &project, &goals_file, &tasks_file)?;
+    let mut numbers = Numbering::reserve(
+        &app.board,
+        &project,
+        &goals_file,
+        &tasks_file,
+        &releases_file,
+    )?;
 
     let mut comments_by_target = group_comments(&comments_file, &mut skipped);
+
+    // Before the goals, which list them: by the time a goal is built the numbering holds only the releases
+    // that are really arriving.
+    let releases = build_releases(&project, &releases_file, &mut numbers, &mut skipped);
 
     let mut goals: Vec<GoalModel> = Vec::with_capacity(goals_file.goals.len());
 
     for goal in &goals_file.goals {
-        match build_goal(&project, goal, &numbers, &mut comments_by_target, &targets) {
+        match build_goal(
+            &project,
+            goal,
+            &numbers,
+            &mut comments_by_target,
+            &targets,
+            &mut skipped,
+        ) {
             Ok(model) => goals.push(model),
             Err(err) => skipped.push(SkippedImport::new(goal.id.clone(), err)),
         }
@@ -193,6 +220,15 @@ pub async fn import_project(
     // a board that says it is there.
     let telemetry = MyTelemetryContext::create_empty();
 
+    // Releases ahead of the goals that list them — the order `create_release` writes its two rows in, and
+    // for its reason. Nothing wraps these loops in a transaction, so a request that dies part of the way
+    // through leaves whatever it had reached: a release no goal lists yet is a legitimate thing to find on
+    // a board, where the other order would leave goals pointing at numbers that name nothing.
+    for release in &releases {
+        let dto: ReleaseDto = release.into();
+        app.releases_repo.upsert(&dto, &telemetry).await;
+    }
+
     for goal in &goals {
         let dto: GoalDto = goal.into();
         app.goals_repo.upsert(&dto, &telemetry).await;
@@ -211,14 +247,17 @@ pub async fn import_project(
 
     let goals_written = goals.len();
     let tasks_written = tasks.len();
+    let releases_written = releases.len();
 
     // One snapshot swap for the whole import, rather than one per card.
-    app.board.upsert_goals_and_tasks(goals, tasks);
+    app.board
+        .upsert_goals_releases_and_tasks(goals, releases, tasks);
     app.notify_project_changed(&project.id).await;
 
     Ok(ImportOutcome {
         goals: goals_written,
         tasks: tasks_written,
+        releases: releases_written,
         comments,
         documents: documents.len(),
         skipped,
@@ -261,8 +300,9 @@ impl<'s> ImportArchive<'s> {
         serde_yaml::from_str(&text).map_err(|err| format!("{name} could not be understood: {err}"))
     }
 
-    /// The same, for the three files an export with nothing in them may legitimately omit — a project with no
-    /// goals writes an empty `goals.yaml`, but a hand-made archive is entitled to leave it out.
+    /// The same, for the files an archive may legitimately be without — a project with no goals writes an
+    /// empty `goals.yaml`, but a hand-made archive is entitled to leave it out, and one made before releases
+    /// existed has no `releases.yaml` to leave out.
     fn read_yaml_or_default<TModel: serde::de::DeserializeOwned + Default>(
         &mut self,
         name: &str,
@@ -421,30 +461,43 @@ async fn import_briefs(app: &AppContext, archive: &mut ImportArchive<'_>, who: &
 /// Source handle -> the number it gets on this board.
 ///
 /// Reserved in one go, before anything is built, because a task can name a goal or a dependency that is
-/// further down the file than it is.
+/// further down the file than it is — and a goal lists releases, which are in another file altogether.
+///
+/// **A release draws from the same run of numbers as the cards, not from one of its own.** This board serves
+/// tasks, goals and releases from a single counter, as the board the file left did, and that is what keeps
+/// `NEW-41`, `NEW-G41` and `NEW-R41` from ever coexisting; a release numbered any other way would be the one
+/// thing an import could land on top of a card. The three maps stay apart all the same, because a reference
+/// says what KIND of thing it points at: a goal that lists `TM-42` among its releases has to find nothing
+/// there, not the task.
 struct Numbering {
     goals: AHashMap<String, i64>,
     tasks: AHashMap<String, i64>,
+    releases: AHashMap<String, i64>,
 }
 
 impl Numbering {
+    /// Takes the board rather than the `AppContext` it is reached through, because the board is all a
+    /// reservation touches — and a board can be built in a test, where the rest of an `AppContext` is
+    /// Postgres. This is the half of an import in which a miscount is a panic rather than a skipped entry.
     fn reserve(
-        app: &AppContext,
+        board: &Board,
         project: &ProjectModel,
         goals_file: &GoalsFile,
         tasks_file: &TasksFile,
+        releases_file: &ReleasesFile,
     ) -> Result<Self, String> {
-        let amount = (goals_file.goals.len() + tasks_file.tasks.len()) as i64;
+        let amount =
+            (goals_file.goals.len() + tasks_file.tasks.len() + releases_file.releases.len()) as i64;
 
         if amount == 0 {
             return Ok(Self {
                 goals: AHashMap::new(),
                 tasks: AHashMap::new(),
+                releases: AHashMap::new(),
             });
         }
 
-        let reserved = app
-            .board
+        let reserved = board
             .reserve_task_numbers(&project.id, amount)
             .ok_or_else(|| {
                 format!(
@@ -457,6 +510,7 @@ impl Numbering {
 
         let mut goals = AHashMap::with_capacity(goals_file.goals.len());
         let mut tasks = AHashMap::with_capacity(tasks_file.tasks.len());
+        let mut releases = AHashMap::with_capacity(releases_file.releases.len());
 
         // In file order, so the cards land on this board in the order they were written on the other one.
         //
@@ -486,7 +540,28 @@ impl Numbering {
             }
         }
 
-        Ok(Self { goals, tasks })
+        // File order matters here for more than tidiness. The export writes releases by number, and the
+        // number is what orders two releases of one date in every list of them — so handing numbers out
+        // in the order the file has them is what keeps a day's releases reading as they did.
+        for release in &releases_file.releases {
+            let number = numbers.next().expect("one number per release was reserved");
+
+            if releases
+                .insert(normalise_handle(&release.id), number)
+                .is_some()
+            {
+                return Err(format!(
+                    "'{}' is in {RELEASES_FILE} more than once — an id names one release",
+                    release.id
+                ));
+            }
+        }
+
+        Ok(Self {
+            goals,
+            tasks,
+            releases,
+        })
     }
 }
 
@@ -554,6 +629,7 @@ fn build_goal(
     numbers: &Numbering,
     comments: &mut AHashMap<String, Vec<CommentModel>>,
     documents: &DocumentTargets,
+    skipped: &mut Vec<SkippedImport>,
 ) -> Result<GoalModel, String> {
     let handle = normalise_handle(&src.id);
 
@@ -569,6 +645,35 @@ fn build_goal(
         .get(&handle)
         .ok_or_else(|| format!("'{}' has no number reserved for it", src.id))?;
 
+    // The leniency a task's dependencies get, and one line per lost edge for the same reason: a release
+    // that is not arriving cannot be listed here. Usually that is one the archive does not carry. The
+    // number in its handle came out of another counter — the source board's, or some third project's when
+    // the prefix is not even the export's own — and on this board it names something else or nothing. It
+    // is equally one the archive does carry that would not build, which `build_releases` has taken out of
+    // the map by now. The goal is real either way, so it arrives without the edge and says so.
+    //
+    // **A deleted release is not one of those.** It is in the archive, so the goal goes on listing it, and
+    // bringing it back on this board puts it on the goal again exactly as it would have on the other.
+    let mut releases = Vec::with_capacity(src.releases.len());
+
+    for release in &src.releases {
+        match numbers.releases.get(&normalise_handle(release)) {
+            // In the order the goal lists them and once each — the shape `ReleasesPatch` leaves this list
+            // in. Not sorted, as a task's dependencies are: the order here is the order they were attached.
+            Some(release_number) => {
+                if !releases.contains(release_number) {
+                    releases.push(*release_number);
+                }
+            }
+            None => skipped.push(SkippedImport::new(
+                src.id.clone(),
+                format!(
+                    "it lists release '{release}', which did not arrive — the link was dropped"
+                ),
+            )),
+        }
+    }
+
     Ok(GoalModel {
         project_id: project.id.clone(),
         number,
@@ -580,11 +685,98 @@ fn build_goal(
         priority: Priority::parse_or_default(&src.priority),
         subtasks: build_subtasks(&src.subtasks)?,
         documents: resolve_documents(&src.documents, documents),
+        releases,
         comments: comments.remove(&handle).unwrap_or_default(),
         created: decode_moment(&src.created, "a goal's created")?,
         updated: decode_moment(&src.updated, "a goal's updated")?,
         close_moment: decode_optional_moment(src.closed.as_deref(), "a goal's closed")?,
         deleted_moment: decode_optional_moment(src.deleted.as_deref(), "a goal's deleted")?,
+    })
+}
+
+/// Every release in the file that can be built — and the numbering told about each one that cannot.
+///
+/// **A release that does not build comes out of the map**, which is what this does that the loops building
+/// the cards do not. Its number is not given back: the counter has moved, and nothing is ever handed that
+/// number again. But no goal built afterwards can resolve to it either, so a goal that listed it reports
+/// the lost edge like any other — instead of arriving with a number that names nothing on this board and
+/// never will, and not a line anywhere to say so.
+///
+/// It costs nothing here because of the order. A release points at nothing, so every one of them is settled
+/// before the first goal is built — where a task can depend on a task further down the file.
+fn build_releases(
+    project: &ProjectModel,
+    file: &ReleasesFile,
+    numbers: &mut Numbering,
+    skipped: &mut Vec<SkippedImport>,
+) -> Vec<ReleaseModel> {
+    let mut releases = Vec::with_capacity(file.releases.len());
+
+    for release in &file.releases {
+        match build_release(project, release, numbers) {
+            Ok(model) => releases.push(model),
+            Err(err) => {
+                numbers.releases.remove(&normalise_handle(&release.id));
+                skipped.push(SkippedImport::new(release.id.clone(), err));
+            }
+        }
+    }
+
+    releases
+}
+
+fn build_release(
+    project: &ProjectModel,
+    src: &ReleaseFileModel,
+    numbers: &Numbering,
+) -> Result<ReleaseModel, String> {
+    let handle = normalise_handle(&src.id);
+
+    if parse_release_handle(&handle).is_none() {
+        return Err(format!(
+            "'{}' is not a release id — expected something like TM-R1",
+            src.id
+        ));
+    }
+
+    let number = *numbers
+        .releases
+        .get(&handle)
+        .ok_or_else(|| format!("'{}' has no number reserved for it", src.id))?;
+
+    let mut services = Vec::with_capacity(src.services.len());
+
+    for service in &src.services {
+        services.push(ServiceReleaseModel {
+            // Spelled the way `ServicesPatch` stores them. An export wrote them that way already, so this
+            // only ever changes a file somebody edited — and there it matters: the id is what a later
+            // correction finds this entry by and what one service's history is filtered on, both compared
+            // exactly, and a commit is lower-cased so that one commit is one spelling.
+            microservice_id: service.microservice_id.trim().to_string(),
+            version: service.version.trim().to_string(),
+            git_hash: service.git_hash.trim().to_lowercase(),
+            // The moment somebody SAID this service went out, so the file's and never now — an import is
+            // not a rollout.
+            datetime: decode_moment(&service.datetime, "a service's datetime")?,
+            settings_update_note: decode_text(
+                &service.settings_update_note_base64,
+                "a service's settings note",
+            )?,
+            description: decode_text(&service.description_base64, "a service's description")?,
+        });
+    }
+
+    Ok(ReleaseModel {
+        project_id: project.id.clone(),
+        number,
+        title: decode_text(&src.title_base64, "a release's title")?,
+        description: decode_text(&src.description_base64, "a release's description")?,
+        release_notes: decode_text(&src.release_notes_base64, "a release's notes")?,
+        date: decode_moment(&src.date, "a release's date")?,
+        services,
+        created: decode_moment(&src.created, "a release's created")?,
+        updated: decode_moment(&src.updated, "a release's updated")?,
+        deleted_moment: decode_optional_moment(src.deleted.as_deref(), "a release's deleted")?,
     })
 }
 
@@ -923,6 +1115,7 @@ fn read_notes(app: &AppContext, project_id: &str, tasks: &[TaskModel]) -> Vec<St
 
 #[cfg(test)]
 mod tests {
+    use super::super::export::{goal_to_file, release_to_file};
     use super::*;
 
     /// A handle is matched however it was spelled — the file is hand-editable, and a lower-cased id in it is
@@ -1064,6 +1257,7 @@ mod tests {
                 tasks: 1,
                 comments: 1,
                 documents: 1,
+                releases: 2,
             },
         };
 
@@ -1071,10 +1265,36 @@ mod tests {
     }
 
     /// **The format's own round trip.** Everything the export writes has to come back as what it was — this
-    /// is the one test that reads the four files as a set, and it is what would catch a field renamed on one
+    /// is the one test that reads the files as a set, and it is what would catch a field renamed on one
     /// side only.
     #[test]
     fn what_the_export_writes_is_what_the_import_reads() {
+        // **The releases and the goal that lists them are written by the export itself.** They start as the
+        // models the source board holds and go through `release_to_file` and `goal_to_file`, so a field the
+        // export forgot arrives empty and fails below. A file model filled in by hand, as the task under
+        // this is, can only prove that the import reads what the test wrote.
+        let source = a_source_project();
+
+        let shipped = a_release(12);
+        let recalled = ReleaseModel {
+            title: "Recorded by mistake".to_string(),
+            deleted_moment: Some(moment("2026-10-10T09:00:00.000000Z")),
+            ..a_release(15)
+        };
+
+        let releases = ReleasesFile {
+            releases: vec![
+                release_to_file(&source, &shipped),
+                release_to_file(&source, &recalled),
+            ],
+        };
+
+        // The deleted one first: the list is in the order the releases were attached, which is not the
+        // order of their numbers and has to survive as it is.
+        let goals = GoalsFile {
+            goals: vec![goal_to_file(&source, &a_goal(7, &[15, 12]))],
+        };
+
         let tasks = TasksFile {
             tasks: vec![TaskFileModel {
                 id: "TM-42".to_string(),
@@ -1112,12 +1332,19 @@ mod tests {
             }],
         };
 
+        let releases_yaml = serde_yaml::to_string(&releases).unwrap();
+
         let archive = zip_of(&[
             (PROJECT_FILE, &a_project_file()),
+            (
+                GOALS_FILE,
+                serde_yaml::to_string(&goals).unwrap().as_bytes(),
+            ),
             (
                 TASKS_FILE,
                 serde_yaml::to_string(&tasks).unwrap().as_bytes(),
             ),
+            (RELEASES_FILE, releases_yaml.as_bytes()),
             (
                 DOCUMENTS_FILE,
                 serde_yaml::to_string(&documents).unwrap().as_bytes(),
@@ -1177,10 +1404,91 @@ mod tests {
             vec!["raw/RMS/document/01K2C4Q0S1T2U3V4W5X6Y7Z8".to_string()],
             "the reference has to survive the crossing and land on the receiving board's prefix"
         );
+
+        assert_eq!(project.contents.releases, 2);
+
+        // **`releases.yaml`, as a person opening it finds it**: the handle, the date and the three
+        // identifiers of a service are there to be read, and none of the prose is.
+        for legible in [
+            "id: TM-R12",
+            "id: TM-R15",
+            "date: 2026-10-07T00:00:00.000000Z",
+            "microservice_id: task-manager-rest-api",
+            "version: 0.1.67",
+            "git_hash: 099602e4c1a9b7d2f3e5a6b8c9d0e1f2a3b4c5d6",
+        ] {
+            assert!(
+                releases_yaml.contains(legible),
+                "'{legible}' should be legible in:\n{releases_yaml}"
+            );
+        }
+
+        for prose in ["What went out", "the table and the tools", "enabled: true"] {
+            assert!(
+                !releases_yaml.contains(prose),
+                "'{prose}' is prose and should travel encoded:\n{releases_yaml}"
+            );
+        }
+
+        // **And what it means, once it is read back and built**: the same two releases, field for field,
+        // under the numbers this board reserved for them. That comparison is also what holds the second
+        // service's `1.10` and `1234567` to arriving as the text they are, and not as the numbers a YAML
+        // reader would make of them given the chance.
+        let numbers = numbering(&[("TM-G7", 41)], &[], &[("TM-R12", 51), ("TM-R15", 52)]);
+        let target = a_target_project();
+
+        let back = read
+            .read_yaml_or_default::<ReleasesFile>(RELEASES_FILE)
+            .unwrap();
+
+        assert_eq!(back.releases.len(), 2);
+
+        let landed =
+            build_release(&target, &back.releases[0], &numbers).expect("the release should build");
+
+        assert_eq!(landed.project_id, "p1", "on the board it arrived at");
+        assert_eq!(landed.number, 51, "under this board's number, not R12");
+        assert_eq!(landed.services.len(), 2);
+        assert_arrived_as_it_left(&landed, &shipped);
+
+        // The deleted one arrives too, and arrives deleted — at the moment it was, not at the import's.
+        let landed_recalled =
+            build_release(&target, &back.releases[1], &numbers).expect("the release should build");
+
+        assert_eq!(landed_recalled.number, 52);
+        assert!(landed_recalled.is_deleted());
+        assert_arrived_as_it_left(&landed_recalled, &recalled);
+
+        // The goal's half. In the file its releases are handles under the SOURCE prefix, in the order the
+        // goal lists them.
+        let goals_back = read.read_yaml::<GoalsFile>(GOALS_FILE).unwrap();
+
+        assert_eq!(
+            goals_back.goals[0].releases,
+            vec!["TM-R15".to_string(), "TM-R12".to_string()]
+        );
+
+        // And the two halves meet: built, the goal lists the releases the file carries — the deleted one
+        // among them, so that bringing it back here puts it on the goal as it would have there.
+        let mut skipped = Vec::new();
+
+        let goal = build_goal(
+            &target,
+            &goals_back.goals[0],
+            &numbers,
+            &mut AHashMap::new(),
+            &targets(&[]),
+            &mut skipped,
+        )
+        .expect("the goal should build");
+
+        assert!(skipped.is_empty(), "nothing was lost");
+        assert_eq!(goal.releases, vec![landed_recalled.number, landed.number]);
     }
 
-    /// The three list files are the ones a hand-made archive may leave out, and an absent one means "none of
-    /// those" rather than "this is not an export".
+    /// The four list files are the ones an archive may be without, and an absent one means "none of those"
+    /// rather than "this is not an export". For `releases.yaml` that is not a courtesy to hand-made archives:
+    /// it is every archive this product wrote before a board could have a release.
     #[test]
     fn the_list_files_may_be_absent() {
         let archive = zip_of(&[(PROJECT_FILE, &a_project_file())]);
@@ -1194,7 +1502,92 @@ mod tests {
                 .comments
                 .is_empty()
         );
+        assert!(
+            read.read_yaml_or_default::<ReleasesFile>(RELEASES_FILE)
+                .unwrap()
+                .releases
+                .is_empty()
+        );
         assert!(read.document_names().is_empty());
+    }
+
+    /// **Why `FORMAT` is still `1`.** This is an archive as a build from before releases wrote it: no
+    /// `releases.yaml`, no `releases` under a goal, no `releases` among the contents. It is spelled out as
+    /// text because one made from today's models would carry all three and prove nothing. It has to read,
+    /// and as a board with no releases — which is what it was.
+    #[test]
+    fn an_archive_from_before_releases_reads_as_a_board_with_none() {
+        let project = [
+            "format: task-manager-project/1",
+            "exported: 2026-08-06T09:00:00.000000Z",
+            "project:",
+            "  prefix: TM",
+            "  name_base64: VGFzayBtYW5hZ2Vy",
+            "  description_base64: VGhlIGJvYXJk",
+            "contents:",
+            "  goals: 1",
+            "  tasks: 0",
+            "  comments: 0",
+            "  documents: 0",
+        ]
+        .join("\n");
+
+        let goals = [
+            "goals:",
+            "- id: TM-G7",
+            "  name_base64: UmVsZWFzZXM=",
+            "  description_base64: ''",
+            "  color: blue",
+            "  priority: high",
+            "  subtasks: []",
+            "  documents: []",
+            "  created: 2026-08-01T09:00:00.000000Z",
+            "  updated: 2026-08-05T09:00:00.000000Z",
+        ]
+        .join("\n");
+
+        let archive = zip_of(&[
+            (PROJECT_FILE, project.as_bytes()),
+            (GOALS_FILE, goals.as_bytes()),
+        ]);
+
+        let mut read = ImportArchive::open(&archive).unwrap();
+
+        let project_file = read.read_yaml::<ProjectFile>(PROJECT_FILE).unwrap();
+
+        assert_eq!(
+            project_file.format, FORMAT,
+            "the format an old archive names has to be the one this build still reads"
+        );
+        assert_eq!(project_file.contents.releases, 0);
+
+        assert!(
+            read.read_yaml_or_default::<ReleasesFile>(RELEASES_FILE)
+                .unwrap()
+                .releases
+                .is_empty()
+        );
+
+        let goals_file = read.read_yaml::<GoalsFile>(GOALS_FILE).unwrap();
+
+        assert!(goals_file.goals[0].releases.is_empty());
+
+        // And the goal builds, with nothing to report: an archive that never had a release has lost none.
+        let mut skipped = Vec::new();
+
+        let goal = build_goal(
+            &a_target_project(),
+            &goals_file.goals[0],
+            &numbering(&[("TM-G7", 41)], &[], &[]),
+            &mut AHashMap::new(),
+            &targets(&[]),
+            &mut skipped,
+        )
+        .expect("an old goal is still a goal");
+
+        assert_eq!(goal.name, "Releases");
+        assert!(goal.releases.is_empty());
+        assert!(skipped.is_empty());
     }
 
     /// `project.yaml` is what makes an archive a project export. Without it there is nothing to check the
@@ -1233,17 +1626,136 @@ mod tests {
         }
     }
 
+    /// The board the archive was taken from. Only its prefix matters: it is what every handle in the file
+    /// is spelled with.
+    fn a_source_project() -> ProjectModel {
+        ProjectModel {
+            id: "p0".to_string(),
+            name: "Source".to_string(),
+            prefix: "TM".to_string(),
+            ..a_target_project()
+        }
+    }
+
+    /// The receiving board itself, holding nothing but its project — which is all a reservation reads.
+    fn a_target_board() -> Board {
+        let board = Board::new();
+        board.upsert_project(a_target_project());
+        board
+    }
+
     /// The numbering a reservation would have produced, without a board to reserve from.
-    fn numbering(goals: &[(&str, i64)], tasks: &[(&str, i64)]) -> Numbering {
+    fn numbering(
+        goals: &[(&str, i64)],
+        tasks: &[(&str, i64)],
+        releases: &[(&str, i64)],
+    ) -> Numbering {
+        let map = |src: &[(&str, i64)]| -> AHashMap<String, i64> {
+            src.iter()
+                .map(|(handle, number)| (handle.to_string(), *number))
+                .collect()
+        };
+
         Numbering {
-            goals: goals
-                .iter()
-                .map(|(handle, number)| (handle.to_string(), *number))
-                .collect(),
-            tasks: tasks
-                .iter()
-                .map(|(handle, number)| (handle.to_string(), *number))
-                .collect(),
+            goals: map(goals),
+            tasks: map(tasks),
+            releases: map(releases),
+        }
+    }
+
+    fn moment(src: &str) -> DateTimeAsMicroseconds {
+        DateTimeAsMicroseconds::from_str(src).expect("a valid moment")
+    }
+
+    /// A release as the source board holds it, with something in every field that can hold something.
+    ///
+    /// Two services, and they are not alike on purpose. The first changes its settings and says so in prose
+    /// YAML would have opinions about. The second says nothing at all — an empty note is a fact too, it is
+    /// how a release says the settings do NOT change — and its version and commit are ones YAML would read
+    /// as numbers, which a legible field has to survive.
+    fn a_release(number: i64) -> ReleaseModel {
+        ReleaseModel {
+            project_id: "p0".to_string(),
+            number,
+            title: "Releases".to_string(),
+            description: "# What went out\n\n- the record: of a feature\n".to_string(),
+            release_notes: "A goal lists the releases it shipped in.\n\t\"Quoted\", too."
+                .to_string(),
+            date: moment("2026-10-07T00:00:00.000000Z"),
+            services: vec![
+                ServiceReleaseModel {
+                    microservice_id: "task-manager-rest-api".to_string(),
+                    version: "0.1.67".to_string(),
+                    git_hash: "099602e4c1a9b7d2f3e5a6b8c9d0e1f2a3b4c5d6".to_string(),
+                    datetime: moment("2026-10-07T14:30:00.000000Z"),
+                    settings_update_note: "add to settings:\n  releases:\n    enabled: true\n"
+                        .to_string(),
+                    description: "the table and the tools".to_string(),
+                },
+                ServiceReleaseModel {
+                    microservice_id: "task-manager-ui".to_string(),
+                    version: "1.10".to_string(),
+                    git_hash: "1234567".to_string(),
+                    datetime: moment("2026-10-07T14:45:10.000000Z"),
+                    settings_update_note: String::new(),
+                    description: String::new(),
+                },
+            ],
+            // Written down the day after it went out, and corrected the day after that: three moments
+            // that are all different, so one arriving in another's place cannot pass.
+            created: moment("2026-10-08T09:00:00.000000Z"),
+            updated: moment("2026-10-09T09:00:00.123456Z"),
+            deleted_moment: None,
+        }
+    }
+
+    /// A release as the file holds it, for the tests that are about the file rather than the crossing.
+    fn a_release_file_model(id: &str) -> ReleaseFileModel {
+        ReleaseFileModel {
+            id: id.to_string(),
+            ..release_to_file(&a_source_project(), &a_release(1))
+        }
+    }
+
+    /// Field for field, but for the two an import exists to change: the project it is on, and the number it
+    /// has there.
+    fn assert_arrived_as_it_left(landed: &ReleaseModel, left: &ReleaseModel) {
+        assert_eq!(landed.title, left.title);
+        assert_eq!(landed.description, left.description);
+        assert_eq!(landed.release_notes, left.release_notes);
+        assert_eq!(landed.date, left.date);
+        // Every service, every field of each, and in the order they were added.
+        assert_eq!(landed.services, left.services);
+        assert_eq!(landed.created, left.created);
+        assert_eq!(landed.updated, left.updated);
+        assert_eq!(landed.deleted_moment, left.deleted_moment);
+    }
+
+    /// A goal as the source board holds it, listing these releases in this order.
+    fn a_goal(number: i64, releases: &[i64]) -> GoalModel {
+        GoalModel {
+            project_id: "p0".to_string(),
+            number,
+            name: "Releases".to_string(),
+            description: String::new(),
+            color: KindColor::Blue,
+            priority: Priority::High,
+            subtasks: Vec::new(),
+            documents: Vec::new(),
+            releases: releases.to_vec(),
+            comments: Vec::new(),
+            created: moment("2026-08-01T09:00:00.000000Z"),
+            updated: moment("2026-08-05T09:00:00.000000Z"),
+            close_moment: None,
+            deleted_moment: None,
+        }
+    }
+
+    /// A goal as the file holds it, listing nothing until a test says what.
+    fn a_goal_file_model(id: &str) -> GoalFileModel {
+        GoalFileModel {
+            id: id.to_string(),
+            ..goal_to_file(&a_source_project(), &a_goal(1, &[]))
         }
     }
 
@@ -1269,12 +1781,16 @@ mod tests {
     }
 
     /// **The heart of an import.** Every reference in the file is a handle from the board it came from, and
-    /// every one of them has to come out as a number on THIS board — the goal, the dependencies, and nothing
-    /// left pointing at what the file said.
+    /// every one of them has to come out as a number on THIS board — a task's goal and its dependencies, the
+    /// releases a goal lists, and nothing left pointing at what the file said.
     #[test]
     fn every_reference_is_remapped_onto_this_boards_numbers() {
         let project = a_target_project();
-        let numbers = numbering(&[("TM-G7", 41)], &[("TM-42", 42), ("TM-4", 43)]);
+        let numbers = numbering(
+            &[("TM-G7", 41)],
+            &[("TM-42", 42), ("TM-4", 43)],
+            &[("TM-R12", 44), ("TM-R15", 45)],
+        );
 
         let mut src = a_task_file_model("TM-42");
         src.goal = Some("TM-G7".to_string());
@@ -1298,6 +1814,35 @@ mod tests {
         assert_eq!(task.goal_number, Some(41), "the goal's NEW number, not G7");
         assert_eq!(task.depends_on, vec![43], "the blocker's NEW number, not 4");
         assert_eq!(task.project_id, "p1");
+
+        // The goal is the other thing in the file that points somewhere: at the releases it went out in,
+        // however the handle was cased. They keep the order the goal listed them in — R15 was attached
+        // first — and one written twice is listed once, which is the shape every other write leaves.
+        let mut src = a_goal_file_model("TM-G7");
+        src.releases = vec![
+            "TM-R15".to_string(),
+            " tm-r12 ".to_string(),
+            "TM-R15".to_string(),
+        ];
+
+        let goal = build_goal(
+            &project,
+            &src,
+            &numbers,
+            &mut comments,
+            &targets(&[]),
+            &mut skipped,
+        )
+        .expect("the goal should build");
+
+        assert!(skipped.is_empty(), "nothing was lost");
+        assert_eq!(goal.number, 41, "the number this board handed out");
+        assert_eq!(
+            goal.releases,
+            vec![45, 44],
+            "the releases' NEW numbers, not R15 and R12"
+        );
+        assert_eq!(goal.project_id, "p1");
     }
 
     /// Everything that is not a reference arrives exactly as it left — including the moments, which is what
@@ -1305,7 +1850,7 @@ mod tests {
     #[test]
     fn what_is_not_a_reference_arrives_unchanged() {
         let project = a_target_project();
-        let numbers = numbering(&[], &[("TM-42", 42)]);
+        let numbers = numbering(&[], &[("TM-42", 42)], &[]);
 
         let mut src = a_task_file_model("TM-42");
         src.labels = vec![" Backend ".to_string(), "backend".to_string()];
@@ -1341,7 +1886,7 @@ mod tests {
     #[test]
     fn a_reference_to_something_outside_the_archive_is_dropped_and_said() {
         let project = a_target_project();
-        let numbers = numbering(&[], &[("TM-42", 42)]);
+        let numbers = numbering(&[("TM-G7", 41)], &[("TM-42", 42)], &[("TM-R12", 44)]);
 
         let mut src = a_task_file_model("TM-42");
         src.goal = Some("TM-G9".to_string());
@@ -1363,6 +1908,297 @@ mod tests {
         assert!(task.depends_on.is_empty());
         assert_eq!(skipped.len(), 2, "the goal and the dependency, one line each");
         assert!(skipped.iter().all(|itm| itm.name == "TM-42"));
+
+        // A goal is held to the same thing about the releases it lists, and three different ways of not
+        // being in the archive all come to it. `TM-R99` is simply not there. `OTHER-R12` is the one that
+        // matters most: the archive DOES carry a release numbered 12, and a handle under another board's
+        // prefix must not be read as that one because the digits agree. And `TM-42` is in the archive, as
+        // a task — one counter serves three kinds, so the marker is all that says which a handle names.
+        let mut src = a_goal_file_model("TM-G7");
+        src.releases = vec![
+            "TM-R99".to_string(),
+            "TM-R12".to_string(),
+            "OTHER-R12".to_string(),
+            "TM-42".to_string(),
+        ];
+
+        let mut skipped = Vec::new();
+
+        let goal = build_goal(
+            &project,
+            &src,
+            &numbers,
+            &mut AHashMap::new(),
+            &targets(&[]),
+            &mut skipped,
+        )
+        .expect("the goal itself is still worth having");
+
+        assert_eq!(
+            goal.releases,
+            vec![44],
+            "the one the archive carries is kept"
+        );
+        assert_eq!(
+            skipped.len(),
+            3,
+            "one line for each release it could not list"
+        );
+        assert!(skipped.iter().all(|itm| itm.name == "TM-G7"));
+
+        // Each line names the release it is about, as the file spelled it — that is what somebody
+        // reading the report goes looking for.
+        for (line, lost) in skipped.iter().zip(["'TM-R99'", "'OTHER-R12'", "'TM-42'"]) {
+            assert!(line.reason.contains(lost), "{}", line.reason);
+        }
+    }
+
+    /// **A release that would not build is not one a goal can go on listing.** Its number was reserved and
+    /// nothing will ever be written under it, so a goal resolving to it would point at nothing on this board
+    /// for good, with no line to say so. It comes out of the numbering instead, and the goal reports the lost
+    /// edge as it would for a release the archive never carried — beside the release's own line, which says
+    /// what was wrong with it.
+    #[test]
+    fn a_goal_does_not_go_on_listing_a_release_that_was_skipped() {
+        let project = a_target_project();
+        let mut numbers = numbering(&[("TM-G7", 41)], &[], &[("TM-R12", 44), ("TM-R15", 45)]);
+
+        let mut unreadable = a_release_file_model("TM-R15");
+        unreadable.date = "the day after the 7th".to_string();
+
+        let mut skipped = Vec::new();
+
+        let releases = build_releases(
+            &project,
+            &ReleasesFile {
+                releases: vec![a_release_file_model("TM-R12"), unreadable],
+            },
+            &mut numbers,
+            &mut skipped,
+        );
+
+        assert_eq!(releases.len(), 1);
+        assert_eq!(releases[0].number, 44);
+        assert_eq!(skipped.len(), 1);
+        assert_eq!(skipped[0].name, "TM-R15");
+        assert!(skipped[0].reason.contains("date"), "{}", skipped[0].reason);
+
+        let mut src = a_goal_file_model("TM-G7");
+        src.releases = vec!["TM-R12".to_string(), "TM-R15".to_string()];
+
+        let goal = build_goal(
+            &project,
+            &src,
+            &numbers,
+            &mut AHashMap::new(),
+            &targets(&[]),
+            &mut skipped,
+        )
+        .expect("the goal should build");
+
+        assert_eq!(goal.releases, vec![44], "only the release that arrived");
+        assert_eq!(
+            skipped.len(),
+            2,
+            "the release's own line, then the goal's for the edge"
+        );
+        assert_eq!(skipped[1].name, "TM-G7");
+        assert!(
+            skipped[1].reason.contains("'TM-R15'"),
+            "{}",
+            skipped[1].reason
+        );
+    }
+
+    /// **What an import builds is what the board then answers with.** Its last step puts the goals, the
+    /// releases and the tasks into memory in one swap, and this reads them back the way a screen does. The
+    /// goal shows the release that is live and reads past the one that is deleted — while still holding its
+    /// number, which is what puts it back on the goal the day somebody brings that release back.
+    #[test]
+    fn an_imported_goal_finds_its_releases_on_the_board() {
+        let board = a_target_board();
+        let project = a_target_project();
+        let source = a_source_project();
+
+        let recalled = ReleaseModel {
+            deleted_moment: Some(moment("2026-10-10T09:00:00.000000Z")),
+            ..a_release(15)
+        };
+
+        let mut numbers = numbering(
+            &[("TM-G7", 41)],
+            &[("TM-42", 42)],
+            &[("TM-R12", 44), ("TM-R15", 45)],
+        );
+        let mut skipped = Vec::new();
+
+        let releases = build_releases(
+            &project,
+            &ReleasesFile {
+                releases: vec![
+                    release_to_file(&source, &a_release(12)),
+                    release_to_file(&source, &recalled),
+                ],
+            },
+            &mut numbers,
+            &mut skipped,
+        );
+
+        let goal = build_goal(
+            &project,
+            &goal_to_file(&source, &a_goal(7, &[15, 12])),
+            &numbers,
+            &mut AHashMap::new(),
+            &targets(&[]),
+            &mut skipped,
+        )
+        .expect("the goal should build");
+
+        let mut src = a_task_file_model("TM-42");
+        src.goal = Some("TM-G7".to_string());
+
+        let task = build_task(
+            &project,
+            &src,
+            &numbers,
+            &mut AHashMap::new(),
+            &targets(&[]),
+            &mut skipped,
+        )
+        .expect("the task should build");
+
+        assert!(skipped.is_empty(), "nothing was lost");
+
+        board.upsert_goals_releases_and_tasks(vec![goal], releases, vec![task]);
+
+        let read = board.read();
+        let goal = read.get_goal("p1", 41).expect("the goal is on the board");
+
+        let shown: Vec<i64> = read
+            .releases_of_goal(&goal)
+            .iter()
+            .map(|itm| itm.number)
+            .collect();
+
+        assert_eq!(shown, vec![44], "the live release, and not the deleted one");
+        assert_eq!(goal.releases, vec![45, 44], "which the goal still lists");
+        assert!(
+            read.get_release_including_deleted("p1", 45)
+                .is_some_and(|itm| itm.is_deleted()),
+            "and which is there to be brought back"
+        );
+
+        // The edge reads from the release's side as well, and the task under the goal arrived with them.
+        let shipped_by: Vec<i64> = read
+            .goals_of_release("p1", 44)
+            .iter()
+            .map(|itm| itm.number)
+            .collect();
+
+        assert_eq!(shipped_by, vec![41]);
+        assert_eq!(
+            read.get_task("p1", 42).and_then(|itm| itm.goal_number),
+            Some(41)
+        );
+    }
+
+    /// **One counter, so one run of numbers.** A release is numbered out of the same reservation as the
+    /// cards, after them and in the order the file has it — and the project's counter ends past all of
+    /// them, so whatever is created on this board next, of any kind, cannot be handed one of these.
+    #[test]
+    fn releases_are_numbered_out_of_the_same_run_as_the_cards() {
+        let board = a_target_board();
+        let project = a_target_project();
+
+        let numbers = Numbering::reserve(
+            &board,
+            &project,
+            &GoalsFile {
+                goals: vec![a_goal_file_model("TM-G7")],
+            },
+            &TasksFile {
+                tasks: vec![a_task_file_model("TM-42"), a_task_file_model("TM-4")],
+            },
+            &ReleasesFile {
+                releases: vec![
+                    a_release_file_model("TM-R12"),
+                    a_release_file_model("tm-r15"),
+                ],
+            },
+        )
+        .expect("the reservation should be made");
+
+        assert_eq!(numbers.goals.get("TM-G7"), Some(&41));
+        assert_eq!(numbers.tasks.get("TM-42"), Some(&42));
+        assert_eq!(numbers.tasks.get("TM-4"), Some(&43));
+        assert_eq!(numbers.releases.get("TM-R12"), Some(&44));
+        assert_eq!(numbers.releases.get("TM-R15"), Some(&45));
+
+        let counter = |board: &Board| board.read().get_project("p1").unwrap().last_task_number;
+
+        assert_eq!(counter(&board), 45);
+
+        // An archive holding releases and nothing else still reserves. Counted as cards only, it would
+        // reserve nothing, and every release in it would be skipped for want of a number.
+        let numbers = Numbering::reserve(
+            &board,
+            &project,
+            &GoalsFile::default(),
+            &TasksFile::default(),
+            &ReleasesFile {
+                releases: vec![a_release_file_model("TM-R12")],
+            },
+        )
+        .expect("the reservation should be made");
+
+        assert_eq!(numbers.releases.get("TM-R12"), Some(&46));
+        assert_eq!(counter(&board), 46);
+    }
+
+    /// The same refusal a repeated card gets, and for its reason: the map is what a goal's list resolves
+    /// through, so two releases under one id would both be built on the second one's number, and the
+    /// second would overwrite the first.
+    #[test]
+    fn a_release_that_is_in_the_file_twice_is_refused_by_name() {
+        let problem = Numbering::reserve(
+            &a_target_board(),
+            &a_target_project(),
+            &GoalsFile::default(),
+            &TasksFile::default(),
+            &ReleasesFile {
+                releases: vec![
+                    a_release_file_model("TM-R12"),
+                    a_release_file_model("tm-r12"),
+                ],
+            },
+        )
+        .err()
+        .expect("a repeated id should be refused");
+
+        assert!(problem.contains("tm-r12"), "{problem}");
+        assert!(problem.contains(RELEASES_FILE), "{problem}");
+    }
+
+    /// A file somebody edited can hold a service's identifiers in a spelling no other write would have
+    /// stored. They arrive in the one every other write uses, or the entry could not be found again: a
+    /// later correction and the per-service history both look a service up by its id, compared exactly.
+    #[test]
+    fn a_services_identifiers_arrive_spelled_as_every_other_write_spells_them() {
+        let mut src = a_release_file_model("TM-R12");
+        src.services[0].microservice_id = " task-manager-rest-api ".to_string();
+        src.services[0].version = " 0.1.67 ".to_string();
+        src.services[0].git_hash = " 099602E ".to_string();
+
+        let release = build_release(
+            &a_target_project(),
+            &src,
+            &numbering(&[], &[], &[("TM-R12", 51)]),
+        )
+        .expect("the release should build");
+
+        assert_eq!(release.services[0].microservice_id, "task-manager-rest-api");
+        assert_eq!(release.services[0].version, "0.1.67");
+        assert_eq!(release.services[0].git_hash, "099602e");
     }
 
     /// A card's thread comes off the map and comes off it ONCE — what is left when every card has been built
@@ -1371,7 +2207,7 @@ mod tests {
     #[test]
     fn a_card_takes_its_thread_out_of_the_map() {
         let project = a_target_project();
-        let numbers = numbering(&[], &[("TM-42", 42)]);
+        let numbers = numbering(&[], &[("TM-42", 42)], &[]);
 
         let mut comments = AHashMap::new();
         comments.insert(
@@ -1405,7 +2241,7 @@ mod tests {
     #[test]
     fn a_card_whose_id_is_not_a_handle_is_refused_by_name() {
         let project = a_target_project();
-        let numbers = numbering(&[], &[("TM-42", 42)]);
+        let numbers = numbering(&[], &[("TM-42", 42)], &[("TM-12", 51), ("TM-G12", 52)]);
 
         for id in ["TM-G7", "not-a-handle", ""] {
             let problem = build_task(
@@ -1419,6 +2255,15 @@ mod tests {
             .unwrap_err();
 
             assert!(problem.contains(id) || id.is_empty(), "{problem}");
+        }
+
+        // A release is held to its own spelling as strictly. Both of these have a number waiting for
+        // them, so it is the id that refuses them and not the lookup — a task's handle and a goal's each
+        // name something else on the board the file came from.
+        for id in ["TM-12", "TM-G12"] {
+            let problem = build_release(&project, &a_release_file_model(id), &numbers).unwrap_err();
+
+            assert!(problem.contains(id), "{problem}");
         }
     }
 

@@ -48,6 +48,10 @@ pub struct GoalPatch {
     pub subtasks: super::SubtasksPatch,
     /// Which documents this goal points at: ids to attach, ids to detach — see [`super::DocumentsPatch`].
     pub documents: super::DocumentsPatch,
+    /// Which releases this goal went out in: ones to attach, ones to detach — see
+    /// [`super::ReleasesPatch`]. Says nothing about whether the goal may close, any more than a document
+    /// does: a goal is finished when its tasks are, and shipped when somebody says so here.
+    pub releases: super::ReleasesPatch,
     pub comment: Option<String>,
     pub comment_by: Option<String>,
 }
@@ -64,6 +68,7 @@ impl GoalPatch {
             && self.deleted.is_none()
             && self.subtasks.is_empty()
             && self.documents.is_empty()
+            && self.releases.is_empty()
             && self.trimmed_comment().is_none()
     }
 
@@ -180,6 +185,8 @@ pub async fn create_goal(app: &AppContext, new_goal: NewGoal) -> Result<String, 
         priority,
         subtasks,
         documents,
+        // A goal is opened before anything under it has shipped. Releases are attached as they go out.
+        releases: Vec::new(),
         comments: Vec::new(),
         created: now,
         updated: now,
@@ -219,7 +226,7 @@ pub async fn update_goal(
 ) -> Result<String, String> {
     if patch.is_empty() {
         return Err(
-            "nothing to update: pass at least one of name, description, color, priority, close, a checklist change, a document reference or comment"
+            "nothing to update: pass at least one of name, description, color, priority, close, a checklist change, a document reference, a release or comment"
                 .to_string(),
         );
     }
@@ -260,6 +267,10 @@ pub async fn update_goal(
         .documents
         .apply(app, &project.id, &mut goal.documents, &handle)
         .await?;
+
+    // On the clone too, and against the snapshot this call started from: a release that is not on this
+    // project, or has been deleted, refuses the whole call.
+    patch.releases.apply(&board, &project, &mut goal.releases)?;
 
     // Everything below is validation, and all of it runs before a single field is written back.
     let closing = patch.close == Some(true) && !was_closed;
@@ -481,6 +492,21 @@ mod tests {
         let patch = GoalPatch {
             subtasks: crate::scripts::SubtasksPatch {
                 check: vec!["some-id".to_string()],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        assert!(!patch.is_empty());
+    }
+
+    /// Attaching a release arrives with nothing else set, exactly as a checklist change does — and it is
+    /// the usual shape of the call: the work was done, it went out, and the goal is told so.
+    #[test]
+    fn a_release_reference_alone_is_not_an_empty_update() {
+        let patch = GoalPatch {
+            releases: crate::scripts::ReleasesPatch {
+                add: vec!["RMS-R12".to_string()],
                 ..Default::default()
             },
             ..Default::default()

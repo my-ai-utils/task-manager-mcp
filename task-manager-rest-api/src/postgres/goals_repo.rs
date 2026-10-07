@@ -95,6 +95,17 @@ pub struct GoalDto {
     #[sql_type("jsonb")]
     #[json]
     pub documents: Option<Vec<String>>,
+    // Numbers of the releases this goal went out in — rows of `releases` on this same project. Numbers
+    // and not handles for the reason `tasks.depends_on` holds numbers: a prefix moves between projects.
+    //
+    // The link is stored HERE rather than on the release, so a release stays a plain record of what
+    // shipped and attaching one is a change to the goal — one atomic upsert of this row.
+    //
+    // NULLABLE for the same reason `subtasks` and `documents` are: the column arrives on a table that
+    // already has rows. `None` reads as no releases, and every write puts a real array in.
+    #[sql_type("jsonb")]
+    #[json]
+    pub releases: Option<Vec<i64>>,
     #[sql_type("timestamp")]
     pub created: DateTimeAsMicroseconds,
     #[sql_type("timestamp")]

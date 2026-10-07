@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use encryption::aes::AesKey;
 use task_manager_shared::goals::GoalResponse;
+use task_manager_shared::releases::ReleaseResponse;
 use task_manager_shared::tasks::TaskResponse;
 use task_manager_shared::ws::{BoardSnapshot, ServerWsPayload};
 
@@ -10,7 +11,7 @@ use crate::documents::DocumentsIndex;
 use crate::github::GithubMirrors;
 use crate::postgres::{
     ColumnTemplatesRepo, DocumentsRepo, GoalsRepo, KindTemplatesRepo, ProjectMembersRepo,
-    ProjectsRepo, TasksRepo, UsersRepo,
+    ProjectsRepo, ReleasesRepo, TasksRepo, UsersRepo,
 };
 use crate::settings::SettingsReader;
 use crate::subscribers::ProjectSubscribers;
@@ -29,6 +30,7 @@ pub struct AppContext {
     pub column_templates_repo: ColumnTemplatesRepo,
     pub kind_templates_repo: KindTemplatesRepo,
     pub goals_repo: GoalsRepo,
+    pub releases_repo: ReleasesRepo,
     pub project_members_repo: ProjectMembersRepo,
     pub tasks_repo: TasksRepo,
     pub users_repo: UsersRepo,
@@ -127,6 +129,7 @@ impl AppContext {
             column_templates_repo: ColumnTemplatesRepo::new(settings_reader.clone()).await,
             kind_templates_repo: KindTemplatesRepo::new(settings_reader.clone()).await,
             goals_repo: GoalsRepo::new(settings_reader.clone()).await,
+            releases_repo: ReleasesRepo::new(settings_reader.clone()).await,
             project_members_repo: ProjectMembersRepo::new(settings_reader.clone()).await,
             tasks_repo: TasksRepo::new(settings_reader.clone()).await,
             users_repo: UsersRepo::new(settings_reader.clone()).await,
@@ -202,33 +205,33 @@ impl AppContext {
                     .goals_of_project(&project.id)
                     .iter()
                     .filter(|goal| !board.is_goal_archived(goal))
-                    .map(|goal| {
-                        let (tasks_amount, done_amount) =
-                            board.goal_progress(&goal.project_id, goal.number);
+                    .map(|goal| crate::mappers::goal_to_response(goal, &project, &board))
+                    .collect();
 
-                        crate::mappers::goal_to_response(
-                            goal,
-                            &project.prefix,
-                            tasks_amount,
-                            done_amount,
-                        )
-                    })
+                // Every live release, newest first — and NOT cut at the archive window the two lists above
+                // are measured against. A release does not age off: the list of them is the history, and
+                // one record per feature shipped stays a short list for a long time.
+                let releases: Vec<ReleaseResponse> = board
+                    .releases_of_project(&project.id)
+                    .iter()
+                    .map(|release| crate::mappers::release_to_response(release, &project, &board))
                     .collect();
 
                 let members: Vec<String> = project.members.iter().cloned().collect();
 
                 // The PREFIX travels, not the id: it is the only name a project has on the wire, and it is
                 // what the watching client sent in its `{"watch":…}` — see `ProjectResponse`.
-                (project.prefix.clone(), tasks, goals, members)
+                (project.prefix.clone(), tasks, goals, releases, members)
             })
         };
 
         let (payload, members) = match prepared {
-            Some((prefix, tasks, goals, members)) => (
+            Some((prefix, tasks, goals, releases, members)) => (
                 ServerWsPayload::board(BoardSnapshot {
                     project: prefix,
                     tasks,
                     goals,
+                    releases,
                 }),
                 members,
             ),

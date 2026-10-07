@@ -117,9 +117,9 @@ pub struct ProjectModel {
     pub kind_template_id: Option<String>,
     pub kinds: Vec<KindModel>,
     pub members: BTreeSet<String>,
-    // High-water mark of the project's own counter, shared by tasks AND goals: a number is handed out
-    // once and names one or the other. Only ever moves forward — deleting a task does not lower it,
-    // which is what keeps a number from being handed out twice.
+    // High-water mark of the project's own counter, shared by tasks, goals AND releases: a number is
+    // handed out once and names exactly one of them. Only ever moves forward — deleting a task does not
+    // lower it, which is what keeps a number from being handed out twice.
     pub last_task_number: i64,
     // How long finished work stays on the board before it counts as archived. `None` means the default
     // seven days, which is what every project did before this was configurable — so a row that has never
@@ -250,6 +250,18 @@ pub struct GoalModel {
     // Ids of the documents this goal references, oldest first. See `TaskModel::documents` — the same list
     // for the same reasons, and a goal is the likelier of the two to point at a written-down decision.
     pub documents: Vec<String>,
+    // Numbers of the releases this goal went out in, in the order they were attached. Numbers and not
+    // handles for the reason `TaskModel::depends_on` holds numbers: a release is on this same project, so
+    // the prefix is implied and storing it would only give it a way to go stale.
+    //
+    // **The link lives here, on the goal** — a release is a project-level record that knows nothing about
+    // goals, and a goal lists what it shipped in. Read it through `BoardInner::releases_of_goal`: a number
+    // naming a release that has been deleted is skipped rather than reported, and the stored value is left
+    // alone, so undeleting the release brings it back onto the goal.
+    //
+    // Nothing stops one release being listed by two goals. It rarely means anything — a release is one
+    // feature going out, and the goal is that feature — but it is not this list's business to forbid.
+    pub releases: Vec<i64>,
     // The discussion the work came out of. Same shape as a task's thread and the same reason it rides on
     // the row: one atomic write per comment.
     pub comments: Vec<CommentModel>,
@@ -286,6 +298,77 @@ impl GoalModel {
         } else {
             task_manager_shared::projects::COLUMN_ID_TODO
         }
+    }
+}
+
+/// One microservice inside a release: which version of it went out, and built from which commit.
+///
+/// **`microservice_id` is the identity within its release.** A release names a service once, so reporting
+/// the same one again corrects the entry rather than adding a second — see `ServicesPatch`.
+///
+/// `settings_update_note` is separate from `description` on purpose, and the separation is the whole reason
+/// it exists: whether a service's settings have to change is the one fact about a release somebody ACTS on
+/// while rolling it out, and a fact that has to be found in prose gets missed. Empty means the settings do
+/// not change. `description` is everything else worth saying about this service's part of the release.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ServiceReleaseModel {
+    pub microservice_id: String,
+    pub version: String,
+    // The commit this version was built from, lower-cased hex. The half of the entry that outlives a
+    // version number: a tag can be moved, and this cannot.
+    pub git_hash: String,
+    // When this service went out. Given by whoever records the release — the one moment in this file that
+    // is a statement by the caller rather than a stamp put on by the server, because the server was not
+    // there when it happened.
+    pub datetime: DateTimeAsMicroseconds,
+    pub settings_update_note: String,
+    pub description: String,
+}
+
+/// A release, in memory — the record that a feature went out, and in what.
+///
+/// **A project-level thing, not a part of a goal.** It is identified by `(project_id, number)` exactly as a
+/// task and a goal are, out of the same per-project counter, so `RMS-7`, `RMS-G7` and `RMS-R7` cannot
+/// coexist and a bare number still names one thing. The handle `RMS-R7` is composed on read from the
+/// project's current prefix and is not stored, for the reason a task's is not.
+///
+/// It does not know which goal it shipped: the goal lists its releases (`GoalModel::releases`). That keeps
+/// this a plain record of what went out — a release recorded before anybody decided which goal it belongs
+/// under is still a release.
+///
+/// One release is one feature across however many microservices it touched, which is why `services` is a
+/// list and the notes are on the release: the release says what changed for a reader, each service says
+/// what was deployed.
+///
+/// There is no state. A release has happened by the time it is written down; the only thing that can
+/// become of it afterwards is being deleted, for one recorded by mistake.
+#[derive(Debug, Clone)]
+pub struct ReleaseModel {
+    pub project_id: String,
+    pub number: i64,
+    pub title: String,
+    // What this release is, as Markdown — the context around it.
+    pub description: String,
+    // What changed for whoever is on the receiving end, as Markdown. Separate from `description` because
+    // the two are read by different people: one explains the release, the other is what gets pasted to
+    // the people affected by it.
+    pub release_notes: String,
+    // The date of the release, as its author gave it — and what every list of releases is ordered by.
+    // Not `created`: a release is often written down after the fact, and the order that matters is the
+    // order things went out in.
+    pub date: DateTimeAsMicroseconds,
+    // In the order they were added, which is normally the order they went out.
+    pub services: Vec<ServiceReleaseModel>,
+    pub created: DateTimeAsMicroseconds,
+    pub updated: DateTimeAsMicroseconds,
+    // When it was deleted, and `None` for one that is not. A flag rather than a removal, for the reason a
+    // task's is: an id that comes back as "no such release" is indistinguishable from a typo.
+    pub deleted_moment: Option<DateTimeAsMicroseconds>,
+}
+
+impl ReleaseModel {
+    pub fn is_deleted(&self) -> bool {
+        self.deleted_moment.is_some()
     }
 }
 

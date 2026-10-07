@@ -48,10 +48,7 @@ async fn handle_request(
         .goals_of_project(&project.id)
         .iter()
         .filter(|goal| include_archived || !board.is_goal_archived(goal))
-        .map(|goal| {
-            let (tasks_amount, done_amount) = board.goal_progress(&goal.project_id, goal.number);
-            goal_to_response(goal, &project.prefix, tasks_amount, done_amount)
-        })
+        .map(|goal| goal_to_response(goal, &project, &board))
         .collect();
 
     HttpOutput::as_json(GoalsResponse { goals }).into_ok_result(true)

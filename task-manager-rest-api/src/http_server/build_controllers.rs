@@ -11,8 +11,8 @@ use crate::app::AppContext;
 /// README.md first.
 pub fn build_controllers(app: &Arc<AppContext>, http_server_builder: &mut HttpServerBuilder) {
     use super::controllers::{
-        auth, column_templates, documents, github, goals, kind_templates, projects, system, tasks,
-        templates, users,
+        auth, column_templates, documents, github, goals, kind_templates, projects, releases,
+        system, tasks, templates, users,
     };
 
     http_server_builder.register_get_action(system::PingAction::new(app.clone()));
@@ -78,6 +78,8 @@ pub fn build_controllers(app: &Arc<AppContext>, http_server_builder: &mut HttpSe
 
     http_server_builder.register_post_action(goals::ListGoalsAction::new(app.clone()));
     http_server_builder.register_post_action(goals::SetGoalColorAction::new(app.clone()));
+    // A read, like the two lists around it. A release is recorded through /mcp.
+    http_server_builder.register_post_action(releases::ListReleasesAction::new(app.clone()));
     http_server_builder.register_post_action(tasks::ListTasksAction::new(app.clone()));
     http_server_builder.register_post_action(tasks::MoveTaskAction::new(app.clone()));
     http_server_builder.register_post_action(tasks::FindTaskAction::new(app.clone()));

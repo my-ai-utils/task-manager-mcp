@@ -681,6 +681,16 @@ fn RenderGoal(
                             "📄 {goal.documents.len()}"
                         }
                     }
+                    // The third of the same kind of hint, and the one that says where the goal got to
+                    // AFTER the work: the counters beside it stop at `done`, and whether what was done is
+                    // out is a different fact. Drawn only when there is one, like its two neighbours.
+                    if !goal.releases.is_empty() {
+                        span {
+                            class: "goal-releases",
+                            title: "Went out in {goal.releases.len()} release(s) — open the goal to read them",
+                            "🚀 {goal.releases.len()}"
+                        }
+                    }
                     if goal.comments.len() > 0 {
                         span { class: "goal-comments", title: "{goal.comments.len()} notes on the thread",
                             "💬 {goal.comments.len()}"

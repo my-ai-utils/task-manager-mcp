@@ -7,7 +7,7 @@ use task_manager_shared::projects::{COLUMN_ID_DONE, COLUMN_ID_TODO};
 
 use super::{
     ARCHIVE_AFTER, Board, BoardInner, ColumnModel, ColumnTemplateModel, GoalModel, KindModel,
-    KindTemplateModel, ProjectModel, TaskModel, UserModel,
+    KindTemplateModel, ProjectModel, ReleaseModel, TaskModel, UserModel,
 };
 
 const TEMPLATE_ID: &str = "tpl";
@@ -119,10 +119,28 @@ fn goal(project_id: &str, number: i64) -> GoalModel {
         priority: Priority::default(),
         subtasks: Vec::new(),
         documents: Vec::new(),
+        // Shipped in nothing. The release tests below attach them by hand.
+        releases: Vec::new(),
         comments: Vec::new(),
         created: DateTimeAsMicroseconds::new(0),
         updated: DateTimeAsMicroseconds::new(0),
         close_moment: None,
+        deleted_moment: None,
+    }
+}
+
+/// A release dated `day` days after the epoch — the tests order by date, so the fixture takes one.
+fn release(project_id: &str, number: i64, day: i64) -> ReleaseModel {
+    ReleaseModel {
+        project_id: project_id.to_string(),
+        number,
+        title: format!("release {number}"),
+        description: String::new(),
+        release_notes: String::new(),
+        date: DateTimeAsMicroseconds::new(day * 24 * 60 * 60 * 1_000_000),
+        services: Vec::new(),
+        created: DateTimeAsMicroseconds::new(0),
+        updated: DateTimeAsMicroseconds::new(0),
         deleted_moment: None,
     }
 }
@@ -637,6 +655,7 @@ fn the_counter_floor_counts_goals_as_well_as_tasks() {
         vec![template()],
         vec![kind_template()],
         vec![goal("p", 9)],
+        Vec::new(),
     );
 
     assert_eq!(
@@ -644,6 +663,137 @@ fn the_counter_floor_counts_goals_as_well_as_tasks() {
         9,
         "the floor is the highest number in use, whichever kind of thing holds it"
     );
+}
+
+/// Releases are the third thing to draw from that counter, so they hold the floor up too — a release is
+/// very often the newest thing on a project, which makes it the row most likely to carry the highest
+/// number.
+#[test]
+fn the_counter_floor_counts_releases_too() {
+    let mut behind = project("p", "RMS", &[]);
+    behind.last_task_number = 1;
+
+    let inner = BoardInner::from_loaded(
+        vec![behind],
+        vec![task("p", 2, COLUMN_ID_TODO, &[])],
+        Vec::new(),
+        vec![template()],
+        vec![kind_template()],
+        vec![goal("p", 9)],
+        vec![release("p", 14, 1)],
+    );
+
+    assert_eq!(inner.get_project("p").unwrap().last_task_number, 14);
+}
+
+/// Newest first by the DATE of the release, not by the order they were written down in: a release
+/// recorded late, with an earlier date, belongs below the ones that went out after it.
+#[test]
+fn releases_come_back_newest_first_by_their_date() {
+    let board = board();
+    board.upsert_project(project("p", "RMS", &[]));
+
+    board.upsert_release(release("p", 1, 10));
+    board.upsert_release(release("p", 2, 30));
+    // Written down last, went out first.
+    board.upsert_release(release("p", 3, 5));
+    // Two on one day: the later number is the one recorded later, so it reads as the newer.
+    board.upsert_release(release("p", 4, 30));
+
+    let read = board.read();
+
+    let numbers: Vec<i64> = read
+        .releases_of_project("p")
+        .iter()
+        .map(|itm| itm.number)
+        .collect();
+
+    assert_eq!(numbers, vec![4, 2, 1, 3]);
+}
+
+/// A deleted release leaves every list, and the goal that lists it is NOT edited: the number stays where
+/// it was, is read past, and shows again the moment the release comes back. An undo that had to remember
+/// which goals to re-attach to would not be an undo.
+#[test]
+fn a_goal_reads_past_a_release_that_is_deleted_or_not_there() {
+    let board = board();
+    board.upsert_project(project("p", "RMS", &[]));
+
+    board.upsert_release(release("p", 2, 10));
+    board.upsert_release(release("p", 3, 20));
+
+    let mut deleted_release = release("p", 4, 30);
+    deleted_release.deleted_moment = Some(DateTimeAsMicroseconds::new(1));
+    board.upsert_release(deleted_release.clone());
+
+    let mut shipped = goal("p", 1);
+    // 99 names nothing at all — a gap in the data reads as "not there" rather than as an error.
+    shipped.releases = vec![2, 4, 99, 3];
+    board.upsert_goal(shipped.clone());
+
+    let read = board.read();
+
+    let listed: Vec<i64> = read
+        .releases_of_goal(&shipped)
+        .iter()
+        .map(|itm| itm.number)
+        .collect();
+
+    assert_eq!(listed, vec![3, 2], "newest first, the deleted one skipped");
+    assert!(read.get_release("p", 4).is_none());
+    assert!(
+        read.get_release_including_deleted("p", 4).is_some(),
+        "and it is still there for whoever names it"
+    );
+    assert_eq!(read.releases_of_project("p").len(), 2);
+    assert_eq!(read.releases_of_project_including_deleted("p").len(), 3);
+
+    // Brought back: nothing about the goal changes, and it lists the release again.
+    deleted_release.deleted_moment = None;
+    board.upsert_release(deleted_release);
+
+    let read = board.read();
+
+    assert_eq!(read.releases_of_goal(&shipped).len(), 3);
+}
+
+/// The other direction, which nothing stores: a release does not know what it shipped, so the goals are
+/// found by asking each one. Normally exactly one answers.
+#[test]
+fn the_goals_of_a_release_are_the_ones_that_list_it() {
+    let board = board();
+    board.upsert_project(project("p", "RMS", &[]));
+    board.upsert_release(release("p", 10, 1));
+    board.upsert_release(release("p", 11, 2));
+
+    let mut feature = goal("p", 1);
+    feature.releases = vec![10];
+
+    // Nothing stops a second goal listing the same release.
+    let mut also = goal("p", 2);
+    also.releases = vec![10, 11];
+
+    // A deleted goal lists it too, and does not count: nothing can open it.
+    let mut gone = goal("p", 3);
+    gone.releases = vec![10];
+    gone.deleted_moment = Some(DateTimeAsMicroseconds::new(1));
+
+    board.upsert_goal(feature);
+    board.upsert_goal(also);
+    board.upsert_goal(gone);
+
+    let read = board.read();
+
+    let of = |number: i64| -> Vec<i64> {
+        read.goals_of_release("p", number)
+            .iter()
+            .map(|itm| itm.number)
+            .collect()
+    };
+
+    assert_eq!(of(10), vec![1, 2]);
+    assert_eq!(of(11), vec![2]);
+    assert!(of(12).is_empty(), "attached to nothing is a normal state");
 }
 
 /// A goal's progress counts archived work. A goal only closes once every task is done, and by then the

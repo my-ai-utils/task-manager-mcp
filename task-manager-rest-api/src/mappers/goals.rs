@@ -1,6 +1,8 @@
 use task_manager_shared::goals::GoalResponse;
 
-use crate::board::{CommentModel, GoalModel, SubtaskModel, compose_goal_handle};
+use crate::board::{
+    BoardInner, CommentModel, GoalModel, ProjectModel, SubtaskModel, compose_goal_handle,
+};
 use crate::postgres::{GoalCommentJsonModel, GoalDto, GoalSubtaskJsonModel};
 
 impl From<&GoalDto> for GoalModel {
@@ -30,6 +32,9 @@ impl From<&GoalDto> for GoalModel {
                 .collect(),
             // A NULL column is a goal written before documents existed, and it reads as referencing none.
             documents: src.documents.clone().unwrap_or_default(),
+            // A NULL column is a goal written before releases existed, and it reads as having shipped in
+            // none.
+            releases: src.releases.clone().unwrap_or_default(),
             comments: src.comments.iter().map(|itm| itm.into()).collect(),
             created: src.created,
             updated: src.updated,
@@ -55,6 +60,8 @@ impl From<&GoalModel> for GoalDto {
             subtasks: Some(src.subtasks.iter().map(|itm| itm.into()).collect()),
             // Always a real array, for the same reason the checklist is.
             documents: Some(src.documents.clone()),
+            // And again: nullable only so the column could arrive on a populated table.
+            releases: Some(src.releases.clone()),
             comments: src.comments.iter().map(|itm| itm.into()).collect(),
             created: src.created,
             updated: src.updated,
@@ -110,14 +117,18 @@ impl From<&CommentModel> for GoalCommentJsonModel {
 
 /// Memory -> wire.
 ///
-/// `prefix` and the progress both come from outside the goal: the handle is composed from the project's
-/// current prefix, and the counts are taken against the whole board, which a goal knows nothing about.
-pub fn goal_to_response(
-    src: &GoalModel,
-    prefix: &str,
-    tasks_amount: usize,
-    done_amount: usize,
-) -> GoalResponse {
+/// Three things here come from outside the goal, which is why the project and the board are passed in:
+/// the handle is composed from the project's current prefix; the progress is counted against the whole
+/// board, which a goal knows nothing about; and the releases are resolved from the numbers the goal
+/// stores — a release is a project-level record, so the goal holds only where to find it.
+///
+/// Taking the board rather than the three results is deliberate. Every caller used to count the progress
+/// itself and hand it over, and a second thing computed at each call site is a second thing one of them
+/// forgets.
+pub fn goal_to_response(src: &GoalModel, project: &ProjectModel, board: &BoardInner) -> GoalResponse {
+    let prefix = project.prefix.as_str();
+    let (tasks_amount, done_amount) = board.goal_progress(&src.project_id, src.number);
+
     GoalResponse {
         id: compose_goal_handle(prefix, src.number),
         project: prefix.to_string(),
@@ -131,6 +142,12 @@ pub fn goal_to_response(
         subtasks: super::subtasks_to_response(&src.subtasks),
         // Ids only — see `task_to_response`.
         documents: src.documents.clone(),
+        // Whole releases, newest first — deleted ones already left out by the board.
+        releases: board
+            .releases_of_goal(src)
+            .iter()
+            .map(|release| super::release_to_response(release, project, board))
+            .collect(),
         comments: src
             .comments
             .iter()

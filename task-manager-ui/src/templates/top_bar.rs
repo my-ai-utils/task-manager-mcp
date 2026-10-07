@@ -45,6 +45,9 @@ pub fn TopBar(active: &'static str) -> Element {
                 // on the board somebody is already looking at.
                 Link { class: class_of("home"), to: AppRoute::Home { search: None }, "Home" }
                 Link { class: class_of("goals"), to: AppRoute::Goals {}, "Goals" }
+                // Straight after Goals, because it is the next question about the same work: a goal says
+                // what was being built, and this says what of it is out.
+                Link { class: class_of("releases"), to: AppRoute::Releases {}, "Releases" }
                 // Visible to everybody, unlike the admin screens: a document is the work's reference material,
                 // and reading it is what every member of a project needs.
                 Link { class: class_of("documents"), to: AppRoute::Documents { selected: String::new() }, "Documents" }
