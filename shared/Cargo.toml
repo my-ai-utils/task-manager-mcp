@@ -5,7 +5,7 @@ edition = "2024"
 
 # The wire contract between the two sides, defined once:
 #   * task-manager-ui      (wasm) — MyHttpInput gives the FlUrl request builder
-#   * task-manager-rest-api        — the same structs feed #[http_route(input_data: ...)]
+#   * task-manager (the server)   — the same structs feed #[http_route(input_data: ...)]
 #
 # my-http-utils is wasm-safe (serde + rust-extensions, no hyper/tokio), so the default build
 # compiles to wasm32. The `server` feature turns on my-http-utils' own server feature, which

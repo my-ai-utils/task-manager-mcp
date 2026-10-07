@@ -2,6 +2,10 @@
 #   product_id  = task-manager-mcp
 #   template_id = task-manager-rest-api
 #
+# The template id is the name the server had while the client was a container of its own. The crate is
+# `task-manager` now; the template was left as it is, since it is a record in another system and the
+# compose file names it by this id.
+#
 # The live one is the source of truth; this file is here so the shape is reviewable in a diff.
 #
 # The YAML is FLAT — one key per field of `SettingsModel`, no wrapper object. That is how every other

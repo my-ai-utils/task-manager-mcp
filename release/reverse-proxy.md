@@ -9,14 +9,15 @@ hosts:
       type: https
       ssl_certificate: task_manager_cert
 
-    # ORDER IS THE WHOLE CONFIG. Locations are matched by case-insensitive path PREFIX and the FIRST
-    # match wins — there is no longest-prefix rule. Put `/` anywhere but last and every request goes to
-    # the UI, including the API.
+    # ONE UPSTREAM. The product is a single container: the same server answers `/api`, `/mcp`, `/ws` and
+    # `/raw` and serves the browser its bundle for everything else, so the proxy has nothing to tell
+    # apart. There used to be four locations here and a second port for the client; the order they had
+    # to be written in was the whole config, and it is gone with them.
+    #
+    # `/ws` is still spelled out, for its timeout and nothing else. Locations are matched by
+    # case-insensitive path PREFIX and the FIRST match wins — there is no longest-prefix rule — so it
+    # has to stay above `/`.
     locations:
-    - path: /api
-      type: http
-      proxy_pass_to: http://127.0.0.1:31500
-
     - path: /ws
       type: http
       proxy_pass_to: http://127.0.0.1:31500
@@ -24,14 +25,10 @@ hosts:
       # raising — if the upgraded stream turns out to sit outside the timeout, this is harmless anyway.
       request_timeout: 86400000
 
-    - path: /mcp
-      type: http
-      proxy_pass_to: http://127.0.0.1:31500
-
-    # Everything else is the SPA: `/`, `/authorized`, `/projects-setup`, `/users`, `/settings`.
+    # Everything else: the API, MCP, a document's bytes, and the client with every route inside it.
     - path: /
       type: http
-      proxy_pass_to: http://127.0.0.1:31501
+      proxy_pass_to: http://127.0.0.1:31500
 
   # Plain HTTP exists only to send people to HTTPS. The host is written out rather than taken from
   # ${HOST_PORT}, which would carry `:80` into the redirect.
@@ -55,11 +52,10 @@ ssl_certificates:
 
 ## Why these upstreams
 
-`127.0.0.1:31500` / `:31501` rather than the container names. The proxy is on the same host and the ports
-are published, so this works whether or not the proxy sits on `docker_net`. If it does, and you would
-rather not publish the ports at all, swap the upstreams for `http://task-manager-rest-api:8000` and
-`http://task-manager-ui:9001` and delete both `ports:` blocks from the compose — one less surface exposed
-on the host.
+`127.0.0.1:31500` rather than the container name. The proxy is on the same host and the port is
+published, so this works whether or not the proxy sits on `docker_net`. If it does, and you would rather
+not publish the port at all, swap the upstream for `http://task-manager:8000` and delete the `ports:`
+block from the compose — one less surface exposed on the host.
 
 Unix sockets are not an option here: the service does create one, but my-reverse-proxy's unix-socket HTTP
 connector is commented out in its source, so the upstream has to be TCP.
@@ -67,10 +63,11 @@ connector is commented out in its source, so the upstream has to be TCP.
 ## Three things worth checking after the first request
 
 **`/authorized` on a cold load.** Google sends the browser straight there, so it must return `index.html`
-rather than 404. That fallback is `web-app-host`'s job, not the proxy's — the proxy only forwards. Test it
-by opening `https://task-manager.jetdev.eu/authorized` directly in a new tab; a 404 means the SPA fallback
-needs sorting in the UI container, and the whole sign-in breaks without it. Same for `/projects-setup`,
-`/users`, `/settings`.
+rather than 404. That fallback is the server's own — `UiMiddleware` answers any `GET` that is not under
+`/api`, `/mcp`, `/ws`, `/raw`, `/swagger` or `/metrics` with the client's page — and the proxy only
+forwards. Test it by opening `https://task-manager.jetdev.eu/authorized` directly in a new tab; a 404
+means the image was built without `wwwroot/`, and the whole sign-in breaks without it. Same for
+`/projects-setup`, `/users`, `/settings`.
 
 **The WebSocket.** Open Home and look at the dot next to the project dropdown: green means the socket is
 up, grey means it is not. my-reverse-proxy does handle the upgrade (it uses `hyper_tungstenite` and has an

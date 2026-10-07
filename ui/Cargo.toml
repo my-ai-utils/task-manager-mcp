@@ -15,7 +15,7 @@ dioxus-utils = { tag = "0.7.0", git = "https://github.com/MyJetTools/dioxus-util
 
 # The wire contract, reused verbatim from the server. No `server` feature here — the client only needs
 # the schema plus the FlUrl request builder.
-task-manager-shared = { path = "../task-manager-shared" }
+task-manager-shared = { path = "../shared" }
 # FlUrl compiles to the browser fetch API under wasm and resolves relative "/api/..." URLs against the
 # page origin, so no base URL is ever computed.
 flurl = { tag = "0.7.0", git = "https://github.com/MyJetTools/fl-url.git" }

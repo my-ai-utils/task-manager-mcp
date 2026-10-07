@@ -20,7 +20,7 @@ static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 #[tokio::main]
 async fn main() {
-    let settings_reader = settings::SettingsReader::new("~/.task-manager-rest-api").await;
+    let settings_reader = settings::SettingsReader::new("~/.task-manager").await;
     let settings_reader = Arc::new(settings_reader);
 
     let mut service_context = service_sdk::ServiceContext::new(settings_reader.clone()).await;
@@ -44,6 +44,9 @@ async fn main() {
     //
     // That co-location is what makes the WebSocket fan-out a function call rather than a message bus,
     // and it is why this service runs as a single instance.
+    //
+    // And a fourth thing that is not a surface: everything else is the browser's bundle, served out of
+    // `./wwwroot` by this same server — which is what makes the product one container.
     let mcp_middleware = Arc::new(mcp::build_middleware(app.clone()));
 
     service_context.configure_http_server(move |builder| {
@@ -63,6 +66,11 @@ async fn main() {
 
         builder.register_custom_middleware(ws_middleware);
         builder.register_custom_middleware(mcp_middleware.clone());
+
+        // LAST of the custom middlewares, and it would not be enough on its own: service-sdk runs every
+        // one of these before the controllers, so the bundle is behind a wrapper that leaves the server's
+        // own paths alone. See `UiMiddleware` for what happens without it.
+        builder.register_custom_middleware(Arc::new(http_server::UiMiddleware::new()));
 
         http_server::build_controllers(&app, builder);
     });

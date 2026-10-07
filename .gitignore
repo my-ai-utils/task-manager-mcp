@@ -1,14 +1,14 @@
 **/target
 **/Cargo.lock
-# task-manager-rest-api's lock IS committed, and the pre-baked builder image is why — see
-# .github/workflows/build-task-manager-rest-api-docker.yaml. With the lock ignored, CI resolves fresh and
-# takes the newest semver-compatible release of every transitive crate, so one patch published anywhere in
-# a ~400-crate graph invalidates the image and the warm build silently becomes a cold one. Committing it
-# also means a broken transitive dependency reproduces locally instead of only in CI.
+# The server's lock — the one at the root — IS committed. Most of its dependencies are spelled `"*"`, so
+# with the lock ignored a release resolves fresh and takes the newest semver-compatible release of every
+# transitive crate in a ~400-crate graph: the same tag built twice would be two different binaries, and
+# one bad patch published anywhere would break a release that changed nothing. Committed, a release is
+# what was tested here, and a broken transitive dependency reproduces locally instead of only in CI.
 #
-# task-manager-ui's lock stays ignored: it is a Dioxus WASM build with its own toolchain, it has no builder
-# image, and there is nothing for a lock to protect there yet.
-!task-manager-rest-api/Cargo.lock
+# The client's lock (`ui/`) and the wire crate's (`shared/`) stay ignored: neither is built by CI — the
+# browser bundle is built on a developer's machine and committed as `wwwroot/`.
+!/Cargo.lock
 **/dist
 .claude
 .idea

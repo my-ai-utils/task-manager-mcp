@@ -171,7 +171,7 @@ Done растёт вечно, и снепшот, который тащит вс�
   Реактивны `use_resource`, `use_effect` и чтение `DataState` в рендере.
 - **У `<select>` выбранное задаётся атрибутом `selected` у `<option>`**, а не `value` у самого
   селекта, иначе восстановленный выбор не отображается.
-- **CSS генерируется**: правь `task-manager-ui/css/*.css`, `public/assets/app.css` перезапишется
+- **CSS генерируется**: правь `ui/css/*.css`, `ui/public/assets/app.css` перезапишется
   на следующей сборке.
 - **Никаких `///` на полях структур с `MyHttpInput` / `MyHttpObjectStructure`** — парсер
   атрибутов макроса падает с `Somehow we got Punct here: =`. Комментарий пишется через `//`.

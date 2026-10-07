@@ -1410,6 +1410,7 @@ dependencies = [
  "my-http-server-signal-r-middleware",
  "my-http-server-web-sockets",
  "my-http-utils",
+ "static-files-middleware",
 ]
 
 [[package]]
@@ -2865,6 +2866,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "static-files-middleware"
+version = "0.9.0"
+source = "git+https://github.com/MyJetTools/my-http-server.git?tag=0.9.0#5a70a372ede0ed375123ce1857475e42404e8855"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "flate2",
+ "my-http-server-core",
+ "rust-extensions",
+ "sha2",
+ "tokio",
+ "zstd",
+]
+
+[[package]]
 name = "stopwatch"
 version = "0.0.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2930,8 +2946,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "task-manager-rest-api"
-version = "0.1.13"
+name = "task-manager"
+version = "0.2.0"
 dependencies = [
  "ahash",
  "arc-swap",

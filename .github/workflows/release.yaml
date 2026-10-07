@@ -1,0 +1,71 @@
+name: Release App
+
+# One repository, one service, so a release is a version number: `gh release create 0.2.0 --title
+# "0.2.0" --notes ""` creates the tag, the tag starts this, and the image comes out as
+# `ghcr.io/<owner>/task-manager:0.2.0`. The shape is my-no-sql-server's release workflow.
+#
+# Create the tag with `gh release create`, not with a bare `git push --tags`: the release is the record
+# of what went out, and a tag on its own leaves none.
+on:
+  push:
+    tags: "*"
+
+env:
+  # The owner is taken from the repository rather than written out. Spelling the org by hand is how the
+  # first images of this product landed in somebody else's.
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/task-manager
+
+jobs:
+  build:
+    # 22.04 because the runtime image is: a binary linked against a newer glibc than the image has does
+    # not start.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6.0.2
+
+      - uses: actions-rust-lang/setup-rust-toolchain@v1.15.2
+        with:
+          toolchain: stable
+          # The action's default turns warnings into errors, and this build is not where a warning should
+          # stop a release.
+          rustflags: ""
+
+      - name: Get the version
+        id: get_version
+        run: echo "VERSION=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+
+      # The package's own version is the only line of Cargo.toml that STARTS with `version =` — every
+      # dependency spells its version inside braces — so this rewrites that one and nothing else.
+      - name: Updating version
+        run: sed -i -e 's/^version = .*/version = "${{ steps.get_version.outputs.VERSION }}"/' Cargo.toml
+
+      # THE CLIENT IS NOT BUILT HERE. `wwwroot/` is committed — `./build-ui.sh` on a developer's machine
+      # is what fills it — and the Dockerfile copies it as it is. Checked before the ten-minute build
+      # rather than discovered by `docker build` after it: a repository without the bundle would
+      # otherwise produce an image that answers every page with a 404.
+      - name: Check the client bundle is committed
+        run: |
+          test -f wwwroot/index.html || {
+            echo "wwwroot/index.html is missing — run ./build-ui.sh and commit wwwroot/ before releasing"
+            exit 1
+          }
+
+      # Not about our own protos — we have none. service-sdk pulls in `my-telemetry-writer`, whose build
+      # script runs prost-build, so protoc is required regardless.
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Build
+        run: |
+          export GIT_HUB_TOKEN="${{ secrets.PUBLISH_TOKEN }}"
+          cargo build --release
+
+      - name: Docker login
+        run: echo "${{ secrets.PUBLISH_TOKEN }}" | docker login https://ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Docker Build and Publish
+        run: |
+          VERSION="${{ steps.get_version.outputs.VERSION }}"
+          echo "publishing ${IMAGE_NAME}:${VERSION}"
+          docker build -t ${IMAGE_NAME}:${VERSION} .
+          docker push ${IMAGE_NAME}:${VERSION}

@@ -19,19 +19,55 @@ door does better than MCP, where the author is a string the caller passes.
 Product namespace on the host: `task-manager-mcp`. Successor to `rms/development-tasks-mcp`, which
 this replaces once the first version lands.
 
-## Two services
+## One service, three crates
+
+One repository, one deployable, one container. The layout is `my-no-sql-server`'s:
+
+```
+Cargo.toml, src/   the server — crate `task-manager`
+shared/            the wire models, a path dependency of both sides
+ui/                the browser client, a Dioxus crate
+wwwroot/           the client, BUILT — committed, and what the image serves
+Dockerfile         the binary plus wwwroot
+build-ui.sh        ui/ -> wwwroot/
+release/           docker-compose, the settings template, the proxy config
+```
 
 | | |
 |---|---|
-| **`task-manager-rest-api`** | service-sdk HTTP. Three surfaces on one port: `/api/v1/*` (reads for the UI, configuration CRUD, and the two writes the board owns — a task's column and a goal's colour), `/mcp` (every other task mutation), `/ws` (the whole board, pushed). Owns Postgres. |
-| **`task-manager-ui`** | Dioxus CSR (`dioxus/web`), a static bundle. Talks to the REST API through `flurl`. |
-| **`task-manager-shared`** | Wire models, shared verbatim by both. WASM-clean by default; a `server` feature gates `MyHttpInput` / `MyHttpObjectStructure`. |
+| **`task-manager`** (the root) | service-sdk HTTP. Three surfaces on one port: `/api/v1/*` (reads for the UI, configuration CRUD, and the two writes the board owns — a task's column and a goal's colour), `/mcp` (every other task mutation), `/ws` (the whole board, pushed). Owns Postgres. And it serves the client: everything that is not one of those is the bundle in `wwwroot/`. |
+| **`task-manager-ui`** (`ui/`) | Dioxus CSR (`dioxus/web`), a static bundle. Talks to the REST API through `flurl`, on relative URLs — it is served by the server it calls. |
+| **`task-manager-shared`** (`shared/`) | Wire models, shared verbatim by both. WASM-clean by default; a `server` feature gates `MyHttpInput` / `MyHttpObjectStructure`. |
+
+There is no workspace: the three are separate crates with their own `target/`, and `cargo build` at the
+root builds the server alone.
+
+**The client was a container of its own, and is not any more.** It used to ship as a second image on
+`web-app-host`, behind a second port, with a reverse proxy sending `/api`, `/ws` and `/mcp` one way and
+everything else the other. But it is a folder of static files, and the server is already listening on
+the origin those files call back to — so it serves them, and the product is one image, one port, one
+upstream and one version number.
+
+**`UiMiddleware` is what serves it, and it is not the stock middleware bare.** The client is a
+single-page app, so a path that names no file — `/goals`, `/releases`, Google's redirect to `/authorized`
+— has to answer with `index.html`. `StaticFilesMiddleware` does that for *every* request it is shown,
+whatever the method; and service-sdk runs custom middlewares **before** the controllers, where
+`my-no-sql-server`, which assembles its server by hand, puts the static files last. Registered bare it
+would answer `POST /api/tasks/v1/list` with a page of HTML and a 200 — every call succeeding and none of
+them parsing. So the wrapper decides two things first: only a `GET` is a browser fetching a page, and a
+path under `/api`, `/mcp`, `/ws`, `/raw`, `/swagger` or `/metrics` is the server's own to answer,
+including to answer 404. The list is of the server's paths rather than the client's on purpose: a new
+screen is added far more often than a new surface, and a screen that had to be registered on the server
+to survive a reload would be forgotten the first time. Files go out with an `ETag` and
+`Cache-Control: no-cache`, so a visit costs a `304` rather than the whole wasm and a deploy is picked up
+by the next reload. It is tested over a real socket against the committed bundle, with a stand-in for
+the controllers placed where service-sdk puts them.
 
 **Deliberate deviation from `architect-playbook`.** By the archetype table an internal employee
 admin panel is `admin-ui` (Dioxus fullstack, server functions in the deployable), and the
-`rest-api` + CSR-`ui` pair is reserved for external `client-ui`. We take the pair anyway, and
-`task-manager-rest-api` owns Postgres directly rather than fronting a `grpc-flows` domain-owner.
-Reason: there is exactly one consumer plus the MCP surface, both in the same process, and
+`rest-api` + CSR-`ui` pair is reserved for external `client-ui`. We take the pair anyway — as two
+crates in one deployable — and the server owns Postgres directly rather than fronting a `grpc-flows`
+domain-owner. Reason: there is exactly one consumer plus the MCP surface, both in the same process, and
 `rms/dashboards-rest-api` + `dashboards-ui` is the same shape already in production. Splitting a
 single responsibility by transport would buy a proto file and two layers of mappers and nothing
 else.
@@ -58,7 +94,7 @@ on every change, so caching payloads would ship every file on the board to every
 anybody moved a sticker. Payloads are read from Postgres one document at a time, when somebody opens one. See
 **Documents** below.
 
-What it costs: **`task-manager-rest-api` is single-instance.** State is authoritative in the
+What it costs: **the service is single-instance.** State is authoritative in the
 process and the WebSocket fan-out is in-process, so a second replica would both diverge and fail
 to notify. This is the playbook default for state-bearing services; here it is a constraint, not
 a default.
@@ -120,7 +156,7 @@ enum in `task-manager-shared`, validated by the server) and an optional **icon**
 as clickable choices rather than dropdowns of names, because a picker that shows the thing beats one that
 spells it. Unlike columns, kinds have no mandatory anchors: a project may have none.
 
-The icons are SVG files in `task-manager-ui/public/assets/images/task-icons`, and the list the picker
+The icons are SVG files in `ui/public/assets/images/task-icons`, and the list the picker
 offers is **generated by `build.rs` from that directory** — dropping a file in and rebuilding is the whole
 job. A kind stores only the file's stem (`bug`, `tech-debt`), and the server never validates it against a
 list: the files ship in the UI bundle, so an unknown name draws as no icon, the same leniency an unknown
@@ -1511,7 +1547,7 @@ Everything below the router goes through one `Shell` component, which owns the s
 screen needs answered first (is anybody signed in) so no view has to handle "not asked yet" and none can
 forget to.
 
-The stylesheet is **generated**: `build.rs` concatenates `css/*.css` into `public/assets/app.css` through
+The stylesheet is **generated**: `ui/build.rs` concatenates `ui/css/*.css` into `ui/public/assets/app.css` through
 `ci_utils::css::CssCompiler`. Edit the numbered sources — an edit to `app.css` survives exactly until the
 next build.
 
@@ -1619,10 +1655,9 @@ email.
 
 ## Running it
 
-Runs on **HETZNER**, product namespace `task-manager-mcp`, host ports from the **31500+** range:
-`31500 → 8000` for the REST API and `31501 → 9001` for the UI. Those container ports are not arbitrary —
-service-sdk's HTTP server listens on 8000 (8888 is its second, technical port) and `web-app-host` serves
-static files on 9001.
+Runs on **HETZNER** as one container, `task-manager`, product namespace `task-manager-mcp`. One host
+port from the **31500+** range: `31500 → 8000`. The container port is not arbitrary — service-sdk's HTTP
+server listens on 8000 (8888 is its second, technical port).
 
 `release/settings-template.yaml` is the settings-service template
 (`product_id = task-manager-mcp`, `template_id = task-manager-rest-api`) and
@@ -1634,12 +1669,18 @@ service if they are wrong, on purpose:
 - `Admins` must name at least one address, or nobody can get into an empty database.
 
 `release/docker-compose.yaml` follows the standard single-VM unix-socket layout, with one deliberate
-deviation from the template: the REST API's memory limit is 256Mb rather than the usual 64Mb, because it
+deviation from the template: the memory limit is 256Mb rather than the usual 64Mb, because the service
 holds the whole product in memory and replaces a snapshot on every write.
 
-`task-manager-ui` calls the REST API on relative `/api/...` URLs and opens `/ws` on the same origin, so the
-reverse proxy has to put both services behind **one** host — the UI never knows a base URL and there is
-nothing in it to configure.
+The client calls the REST API on relative `/api/...` URLs and opens `/ws` on the same origin — the origin
+it was served from, which is this container. It never knows a base URL and there is nothing in it to
+configure, and the reverse proxy has one upstream: see `release/reverse-proxy.md`.
+
+The settings template is still called `task-manager-rest-api`, the name the server had while the client
+was a container of its own. It is a record in settings-service and was left alone on purpose — renaming
+a crate is not a reason to make a deploy wait on a rename in another system. The same goes for nothing
+else: the image, the container, the unix socket and the name the service logs under are all
+`task-manager` now.
 
 Once it is up, register the MCP surface with the client that will work the board:
 
@@ -1647,49 +1688,52 @@ Once it is up, register the MCP surface with the client that will work the board
 "task-manager": { "type": "http", "url": "https://<host>/mcp" }
 ```
 
-Locally: `dx serve` in `task-manager-ui`, and `cargo run` in `task-manager-rest-api`.
+Locally: `cargo run` at the root for the server, which serves whatever is in `wwwroot/`; `dx serve` in
+`ui/` while working on the client. Locally the settings come from `~/.task-manager`; in the container,
+from `SETTINGS_URL`.
 
-### Releasing — the pre-baked builder image
+### Releasing — a version number, and the client is built first
 
-`task-manager-rest-api` releases in about **two minutes** rather than ten, and the trick is that it never
-rebuilds a dependency graph that has not changed. `build-task-manager-rest-api-docker.yaml` is
-`workflow_dispatch`-only: it compiles service-sdk, my-postgres, my-http-server, tokio and jemalloc once
-into `ghcr.io/my-ai-utils/task-manager-rest-api-build-docker:latest`, and every release mounts its fresh
-checkout over that image and compiles only the delta.
+One repository is one service, so a release is a version number:
 
-**Run the builder workflow by hand whenever the GRAPH moves** — a MyJetTools tag bumped, a crate added,
-`Cargo.lock` updated. Nothing else needs it. It is `workflow_dispatch` because there is no Docker daemon on
-a dev machine, so a builder image can only be tested where it is built; iterating on it through release
-tags would burn a version number per attempt.
+```
+./build-ui.sh                                        # only if ui/ or shared/ changed
+git add wwwroot && git commit                        # … and commit what it produced
+gh release create 0.2.0 --title "0.2.0" --notes ""
+```
 
-Four things are load-bearing, and each one silently turns a warm build back into a cold one — no error,
-just the old ten minutes:
+`gh release create` makes the tag, the tag starts `.github/workflows/release.yaml`, and the image comes
+out as `ghcr.io/my-ai-utils/task-manager:0.2.0`. A tag with no release behind it would build as well —
+the workflow fires on any tag, as `my-no-sql-server`'s does — but the release is the record of what went
+out, so it is created with `gh` and not with `git push --tags`.
 
-- **`CARGO_HOME` and `CARGO_TARGET_DIR` live outside `/src`.** The release bind-mounts its checkout over
-  `/src`, and a bind mount *hides* whatever the image had underneath. A target dir in there would vanish at
-  exactly the moment it is meant to be reused;
-- **the image bakes at `/src`, the same absolute path the release mounts.** Cargo fingerprints record
-  absolute paths, so the same sources at another path are a cold build wearing a warm image's name;
-- **the builder's base matches the runtime image's** (`ubuntu:22.04`). The binary is copied into the
-  runtime image rather than rebuilt there, so a newer base links it against a newer glibc and the container
-  dies at start-up on a symbol lookup;
-- **`task-manager-rest-api/Cargo.lock` is committed**, un-ignored explicitly in `.gitignore`. With the lock
-  ignored CI resolves fresh and takes the newest semver-compatible release of every transitive crate, so
-  one patch published anywhere in a ~400-crate graph invalidates the image and warm hits become a lottery
-  nobody can measure. It also means a broken transitive dependency reproduces locally instead of only in
-  CI. Verify with `cargo check --locked` before committing a change to it.
+**`wwwroot/` is committed, and that is the whole of how the client gets into the image.** The workflow
+builds the server and nothing else; the Dockerfile copies `wwwroot/` as it stands at the tag. So what a
+release serves is exactly what is in the repository — and so `./build-ui.sh` is a step of making a
+release, not something CI does for you. It runs `dx build --release --web` in `ui/`, stamps a fresh id
+onto every asset url in `index.html` (`ui/build.py`), and replaces `wwwroot/` with the result.
 
-The context is the **repo root**, not the service folder, because `task-manager-shared` is a path
-dependency. Only those two crates recompile per release: `actions/checkout` stamps every file with the
-checkout time, so cargo considers all of our own sources dirty regardless — which is fine, they are small.
+Two things follow from that, and both are the price of the arrangement rather than accidents:
 
-**A release never breaks because of the builder.** The pull step is `continue-on-error`, and the cold steps
-behind the `if:` are the exact build used before the image existed, token and all. The worst outcome of a
-missing or broken image is the time we used to pay anyway. Confirm in a run that *Build (warm, …)* ran and
-the cold steps were skipped.
+- **a release cut without rebuilding ships the previous client with the new server.** Nothing checks it.
+  The workflow refuses a tag with no `wwwroot/index.html` at all, which catches a repository that never
+  had a bundle and not one that has a stale one. The wire models are shared, so a change under `shared/`
+  is a change to the client too;
+- **every rebuilt client is a few megabytes of history.** The wasm is the bulk of it and its name is
+  hashed, so each build is a new file as far as git is concerned.
 
-Not for `task-manager-ui`: it is a Dioxus WASM build with its own toolchain and `dx build`, running inside
-`ghcr.io/myjettools/dioxus-docker`. Different problem, different fix — and its lock stays ignored.
+The build is a plain `cargo build --release` on the runner, about ten minutes, with the dependency graph
+compiled from scratch each time. There was a pre-baked builder image here that cut it to two; it went
+with the two-service layout, and the shape now is `my-no-sql-server`'s.
+
+**`Cargo.lock` at the root is committed**, un-ignored explicitly in `.gitignore`. Most dependencies are
+spelled `"*"`, so with the lock ignored the same tag built twice would be two different binaries and one
+bad patch published anywhere in a ~400-crate graph would break a release that changed nothing. Verify
+with `cargo check --locked` before committing a change to it.
+
+`.github/workflows/test.yaml` runs the server's tests and the wire crate's on every push to `main`. The
+client's are not there — they are a native build of a Dioxus app, a second dependency graph the size of
+the first, for a crate CI never builds otherwise. Run them with `cargo test` in `ui/`.
 
 ## Open
 

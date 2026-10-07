@@ -2,6 +2,11 @@ service_sdk::macros::use_settings!();
 
 // Settings live in the settings-service under `/settings/task-manager-mcp/task-manager-rest-api`.
 //
+// That template id is the name this crate had while the product was two services, and it is KEPT: the
+// template is a record in another system, on another machine, and renaming a crate here is not a reason
+// to make a deploy depend on somebody renaming a record there first. Locally the same settings are read
+// from `~/.task-manager`.
+//
 // The Google credentials are here rather than in Postgres on purpose: they are what makes the
 // service able to authenticate at all, so putting them behind a screen that requires
 // authentication would leave a fresh deployment with no way in. Same reason `admins` is here —

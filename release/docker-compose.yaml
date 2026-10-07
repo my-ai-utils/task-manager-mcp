@@ -2,24 +2,30 @@
 #
 # Run by hand:
 #
-#   docker compose -f docker-compose.yaml up -d
+#   docker compose -f docker-compose.yaml up -d --remove-orphans
+#
+# `--remove-orphans` matters once, on the first deploy of this shape: the product used to be two
+# containers, `task-manager-rest-api` and `task-manager-ui`, and the first of them holds host port 31500
+# — the one this container publishes. Compose leaves a service that has left the file running unless it
+# is told otherwise, and then this one cannot bind.
 #
 # Volume paths use `${HOME}` rather than `~`. release-mcp expands `~` itself via HOST_HOME, but
 # `docker compose` does not — it hands the path to the daemon verbatim, and the daemon has no idea what
 # `~` means. `${HOME}` is substituted by Compose and works either way.
 #
-# Both services publish a TCP port because a browser reaches them: the UI calls the REST API on relative
-# `/api/...` URLs and opens `/ws` on the same origin, so the reverse proxy has to put both behind ONE
-# host. Host ports come from the 31500+ range reserved for this product.
+# ONE container is the whole product. The server answers `/api`, `/mcp`, `/ws` and `/raw`, and serves the
+# browser its bundle — baked into the image as `./wwwroot` — for everything else. So there is one port to
+# publish and one upstream for the reverse proxy; the client calls back on relative `/api/...` URLs to
+# the origin it was loaded from, which is this same container.
 #
-# Container ports are not arbitrary: service-sdk's HTTP server listens on 8000 (8888 is its second,
-# technical port), and `web-app-host` serves static files on 9001 — the same as my-logger-ui,
-# settings-ui and versions-control-ui on these hosts.
+# The container port is not arbitrary: service-sdk's HTTP server listens on 8000 (8888 is its second,
+# technical port). The host port comes from the 31500+ range reserved for this product; 31501, which the
+# client's own container used to publish, is free again.
 services:
-  task-manager-rest-api:
-    image: ghcr.io/my-ai-utils/task-manager-rest-api:0.1.45
-    hostname: task-manager-rest-api
-    container_name: task-manager-rest-api
+  task-manager:
+    image: ghcr.io/my-ai-utils/task-manager:0.2.0
+    hostname: task-manager
+    container_name: task-manager
     restart: always
     environment:
     # TCP, not the unix socket, because the settings-service holding this product is on ANOTHER machine.
@@ -31,6 +37,10 @@ services:
     # The host comes from `${SETTINGS_IP}` rather than a literal, so the address lives in one place —
     # release-mcp resolves it from its own process environment, and `docker compose` run by hand takes it
     # from the shell.
+    #
+    # The template is still called `task-manager-rest-api`, the name this service had while the client
+    # was a container of its own. It is a record in settings-service, and it was left alone on purpose:
+    # renaming a crate is not a reason to make a deploy wait on a rename in another system.
     - SETTINGS_URL=http://${SETTINGS_IP}:9898/settings/task-manager-mcp/task-manager-rest-api
     - ENV_INFO=HOME
     - UNIX_SOCKET=1
@@ -61,27 +71,11 @@ services:
           # list of paths and sizes. The largest thing a read ever allocates is the one file being
           # read, bounded by MAX_BINARY_LEN like every other document, and git does its own work in
           # its own process.
+          #
+          # Serving the client does not move it either. The bundle is read off the image's disk per
+          # request and is not held: the largest file in it is the wasm, a few megabytes, for as long
+          # as one response takes.
           memory: 256Mb
-    logging:
-      options:
-        max-size: "512Kb"
-        max-file: "1"
-    networks:
-    - docker_net
-
-  # A static bundle: wasm, html, js and css, served by web-app-host. It never knows a base URL — there is
-  # nothing to configure in it, which is also why it has no settings and no unix sockets.
-  task-manager-ui:
-    image: ghcr.io/my-ai-utils/task-manager-ui:0.1.66
-    hostname: task-manager-ui
-    container_name: task-manager-ui
-    restart: always
-    ports:
-    - 31501:9001
-    deploy:
-      resources:
-        limits:
-          memory: 64Mb
     logging:
       options:
         max-size: "512Kb"

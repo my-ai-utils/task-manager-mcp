@@ -1,4 +1,5 @@
-//! The wire contract between `task-manager-rest-api` and `task-manager-ui`.
+//! The wire contract between the server (`task-manager`, the crate at the repository root) and the
+//! browser client (`task-manager-ui`, in `ui/`).
 //!
 //! Request models derive `MyHttpInput` — on the client that is the FlUrl request builder, on the
 //! server (with the `server` feature) the same markup also parses the incoming request. Response
