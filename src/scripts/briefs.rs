@@ -79,7 +79,6 @@ pub async fn set_brief(
         text,
         updated_by: who,
         created,
-        updated: now,
     };
 
     app.briefs.put(&content_hash, brief.clone());

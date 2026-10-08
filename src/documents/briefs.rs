@@ -23,8 +23,11 @@ pub struct Brief {
     pub updated_by: String,
     // When this content was FIRST briefed, kept across a rewrite so that "somebody has read this" has a
     // date that does not move every time the wording improves.
+    //
+    // There is no `updated` beside it. The row in Postgres has one and it is written on every rephrase,
+    // but nothing in this process ever asks when a brief was last reworded — and a field that is filled
+    // in four places and read in none is how a struct comes to look like it promises something.
     pub created: DateTimeAsMicroseconds,
-    pub updated: DateTimeAsMicroseconds,
 }
 
 /// Every brief there is, by content hash.
@@ -62,7 +65,6 @@ impl BriefsIndex {
                         text: row.brief.clone(),
                         updated_by: row.updated_by.clone(),
                         created: row.created,
-                        updated: row.updated,
                     }),
                 )
             })
@@ -96,6 +98,10 @@ impl BriefsIndex {
             .unwrap_or_default()
     }
 
+    /// How many contents are briefed. For the tests alone, which is why it is compiled for them alone:
+    /// everything else asks about one hash at a time, and a public count nobody calls is a warning in
+    /// every build but the one that uses it.
+    #[cfg(test)]
     pub fn amount(&self) -> usize {
         self.inner.load().len()
     }
@@ -232,7 +238,6 @@ mod tests {
                     text: "what it says".to_string(),
                     updated_by: "AI".to_string(),
                     created: DateTimeAsMicroseconds::new(0),
-                    updated: DateTimeAsMicroseconds::new(0),
                 },
             );
         }
@@ -320,7 +325,6 @@ mod tests {
                 text: "a better one".to_string(),
                 updated_by: "yuri@mxtm.ai".to_string(),
                 created: DateTimeAsMicroseconds::new(0),
-                updated: DateTimeAsMicroseconds::new(1),
             },
         );
 
