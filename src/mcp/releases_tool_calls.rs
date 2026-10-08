@@ -55,6 +55,10 @@ pub struct ReleasesListInput {
     )]
     pub not_on_env: Option<String>,
     #[property(
+        description = "Pass false for ONLY the releases that are still going out — not closed yet, the ones somebody still has to do something about. Pass true for only the closed ones. Omit for both"
+    )]
+    pub done: Option<bool>,
+    #[property(
         description = "How many to return, newest first. Omitted gives 20; the most is 100. `total` in the answer says how many there are, so you can tell a short history from a truncated one"
     )]
     pub limit: Option<i32>,
@@ -101,7 +105,8 @@ Filter by `goal` for the releases one feature went out in, by `microservice_id` 
 service, or by `env` for what is out on one environment — `Prod` for what has actually reached \
 production. A release is recorded when it ships anywhere, so the unfiltered list is everything that went \
 out, not everything that is live; each release says where it is in its own `envs`, and `not_on_env` \
-turns the question round to what has not got there yet.\
+turns the question round to what has not got there yet. `done: false` is the releases whose rollout is \
+not over — the short list of what still needs somebody.\
 \
 A project with no releases is a legitimate answer, not an error. Nothing ages off this list: unlike the \
 board it has no archive window, so it is capped by `limit` instead and reports `total`.";
@@ -181,6 +186,10 @@ impl McpToolCall<ReleasesListInput, ReleasesListResponse> for ReleasesListHandle
                 Some(unwanted) => !release.is_on_env(unwanted),
                 None => true,
             })
+            .filter(|release| match model.done {
+                Some(wanted) => release.is_done() == wanted,
+                None => true,
+            })
             .collect();
 
         let releases: Vec<ReleaseView> = matched
@@ -234,6 +243,10 @@ pub struct ReleasesCreateInput {
         description = "The environments this release is ALREADY out on as you record it, as labels — normally the one stand it has just been rolled to, like `Dev`. One word each. Spell them as `envs` on releases_list reports the project's: a label that matches one of those in any case is stored in that spelling. Omit when it has not gone anywhere yet; the rest are added with add_envs on releases_update as the release reaches them — production last, and only once it has actually been rolled"
     )]
     pub envs: Option<Vec<String>>,
+    #[property(
+        description = "Pass true ONLY if the rollout is already over as you record it — the release is on every environment it is going to. That is the case for one written down after the fact. Omit otherwise: a release normally has somewhere still to go, and is closed later with `done: true` on releases_update"
+    )]
+    pub done: Option<bool>,
 }
 
 pub struct ReleasesCreateHandler {
@@ -289,6 +302,7 @@ impl McpToolCall<ReleasesCreateInput, ReleaseWriteResponse> for ReleasesCreateHa
                 services: ServiceReleaseInput::into_new(model.services),
                 goal: model.goal,
                 envs: model.envs.unwrap_or_default(),
+                done: model.done.unwrap_or(false),
             },
         )
         .await?;
@@ -332,6 +346,10 @@ pub struct ReleasesUpdateInput {
     )]
     pub remove_envs: Option<Vec<String>>,
     #[property(
+        description = "Pass true to CLOSE the release: its rollout is over — it has reached every environment it is going to. The moment is stamped for you, and closing one that is already closed changes nothing. Pass false to reopen it, for one that turned out to have somewhere still to go. Omit to leave it alone. Normally passed in the same call as the last `add_envs`, with a `comment` saying how the rollout went"
+    )]
+    pub done: Option<bool>,
+    #[property(
         description = "Pass false to UNDELETE a release somebody removed, which also puts it back on every goal that listed it. Pass true to delete it, which releases_delete also does. Omit to leave it alone"
     )]
     pub deleted: Option<bool>,
@@ -358,14 +376,20 @@ impl ReleasesUpdateHandler {
 impl ToolDefinition for ReleasesUpdateHandler {
     const FUNC_NAME: &'static str = "releases_update";
     const DESCRIPTION: &'static str = "Change a release: rename it, rewrite its notes, re-date it, \
-change which microservices are in it, or say which environments it is out on. Only the fields you pass \
-change.\
+change which microservices are in it, say which environments it is out on, or close it. Only the fields \
+you pass change.\
 \
 REACHING AN ENVIRONMENT IS A LABEL ON THE RELEASE, NOT A SECOND RELEASE. A release is recorded when it \
 ships somewhere, usually a test stand; when the same versions go out to production, pass `Prod` in \
 `add_envs` here rather than recording them again. Its `envs` are what tell 'went out' from 'is live', \
 and releases_list filters by them. `remove_envs` takes a label off, for a release pulled back \
 from an environment.\
+\
+CLOSE A RELEASE WHEN ITS ROLLOUT IS OVER. `done: true` says it has reached every environment it is going \
+to and nothing more will happen to it; that is what takes it off the list of releases somebody still has \
+to do something about. It is your statement — nothing here knows which environments a project has, so it \
+is not worked out from `envs` — and `done: false` reopens one that turned out to have somewhere still to \
+go.\
 \
 A RELEASE NAMES A MICROSERVICE ONCE. `add_services` with an id the release already has corrects that \
 entry instead of adding a second one, which is how a mistyped version or a missing settings note is \
@@ -401,6 +425,7 @@ impl McpToolCall<ReleasesUpdateInput, ReleaseWriteResponse> for ReleasesUpdateHa
                     add: model.add_envs.unwrap_or_default(),
                     remove: model.remove_envs.unwrap_or_default(),
                 },
+                done: model.done,
                 deleted: model.deleted,
                 comment: model.comment,
                 comment_by: model.comment_by,

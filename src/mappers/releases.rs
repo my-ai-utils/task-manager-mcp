@@ -18,6 +18,7 @@ impl From<&ReleaseDto> for ReleaseModel {
             date: src.release_date,
             services: src.services.iter().map(|itm| itm.into()).collect(),
             envs: envs_of_row(src),
+            done_moment: src.done_moment,
             comments: src.comments.iter().map(|itm| itm.into()).collect(),
             created: src.created,
             updated: src.updated,
@@ -54,6 +55,7 @@ impl From<&ReleaseModel> for ReleaseDto {
             envs: Some(src.envs.clone()),
             // Emptied on every write: what it said has been carried into `envs` above.
             released_on_prod_moment: None,
+            done_moment: src.done_moment,
             created: src.created,
             updated: src.updated,
             deleted_moment: src.deleted_moment,
@@ -150,6 +152,7 @@ pub fn release_to_response(
             })
             .collect(),
         envs: src.envs.clone(),
+        done_unix_seconds: src.done_moment.map(|itm| itm.unix_microseconds / 1_000_000),
         comments: src
             .comments
             .iter()
@@ -186,6 +189,7 @@ mod tests {
             comments: Vec::new(),
             envs: envs.map(|itm| itm.into_iter().map(str::to_string).collect()),
             released_on_prod_moment,
+            done_moment: None,
             created: DateTimeAsMicroseconds::new(0),
             updated: DateTimeAsMicroseconds::new(0),
             deleted_moment: None,
@@ -234,6 +238,27 @@ mod tests {
 
         let written: ReleaseDto = (&nowhere).into();
         assert_eq!(written.envs, Some(Vec::new()), "an array, never NULL again");
+    }
+
+    /// Closed is a moment, and it is the moment that makes the trip — both ways, and independently of
+    /// the old production mark beside it, which is emptied on the same write.
+    #[test]
+    fn a_closed_release_keeps_the_moment_it_was_closed_at() {
+        let closed_at = DateTimeAsMicroseconds::new(9_000_000);
+
+        let mut stored = row(Some(vec!["Dev", "Prod"]), Some(DateTimeAsMicroseconds::new(5_000_000)));
+        stored.done_moment = Some(closed_at);
+
+        let loaded: ReleaseModel = (&stored).into();
+        assert!(loaded.is_done());
+        assert_eq!(loaded.done_moment, Some(closed_at));
+
+        let written: ReleaseDto = (&loaded).into();
+        assert_eq!(written.done_moment, Some(closed_at));
+        assert!(written.released_on_prod_moment.is_none());
+
+        let open: ReleaseModel = (&row(Some(vec!["Dev"]), None)).into();
+        assert!(!open.is_done());
     }
 
     /// A service's link survives the trip to the row and back, and a row written before the field existed

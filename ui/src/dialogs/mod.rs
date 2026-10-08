@@ -42,6 +42,8 @@ mod refresh_github;
 pub use refresh_github::*;
 mod release_details;
 pub use release_details::*;
+mod release_row;
+pub use release_row::*;
 mod upload_document;
 pub use upload_document::*;
 mod view_document;

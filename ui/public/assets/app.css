@@ -1136,6 +1136,20 @@ input[type="text"].board-search {
   grid-template-rows: auto minmax(0, 3fr) minmax(0, 2fr);
 }
 
+/* A goal's dialog, whose lower part is tabs — the thread, and the releases the goal went out in.
+
+   The split is NOT a fixed share here, and that is the difference from a task. A task's lower half is its
+   thread and nothing else; a goal's can be a list of releases, each of which opens into a table, and a goal
+   with two lines of description was holding three fifths of the window empty above it. So the top takes
+   what its content needs and no more than 55%, and the tabs get the rest.
+
+   `fit-content()` can only hold the top to that share because `.task-view-top` has `min-height: 0`: the
+   formula is max(minimum, min(limit, max-content)), and without a zero minimum a long text would simply
+   be as tall as it is. Past the limit the text scrolls inside its own column, as it does in a task. */
+.task-view.with-tabs {
+  grid-template-rows: fit-content(55%) minmax(0, 1fr);
+}
+
 /* The band the card has, drawn the same way at the top of the dialog: same colour, same shape, same order —
    handle, then name — so opening a card does not move the one thing the reader clicked.
 
@@ -1188,9 +1202,10 @@ input[type="text"].board-search {
 /* Nothing in that column shrinks, which is the other half of "the scrolling lives here". It has to be
    said: a flex item whose overflow is not `visible` has NO automatic minimum height, and `.md` sets
    `overflow-x: auto` so a wide table scrolls sideways — which silently makes every rendered text
-   squeezable. Beside a short checklist nobody saw it. Beside a goal's releases, which are taller than the
-   dialog, the goal's own text was squeezed to nothing: all of the overflow came out of the one child that
-   could give way. */
+   squeezable. Beside a short checklist nobody saw it. It showed when a goal's releases were drawn in this
+   column: they are taller than the dialog, and the goal's own text was squeezed to nothing — all of the
+   overflow came out of the one child that could give way. The releases have a tab of their own now; the
+   rule stays, because the next tall thing put here would find the same hole. */
 .task-view-left > * {
   flex-shrink: 0;
 }
@@ -1448,10 +1463,49 @@ button.task-view-check-row:hover {
   padding-right: 4px;
 }
 
+/* The tabs of a goal's dialog. They stand where the thread's header stands in a task's, and are drawn in
+   its face — the same small caps, the same count beside the word — because each IS the header of what is
+   under it; the only thing added is which of the two is being looked at. They stay put while the list
+   under them scrolls, for the reason that header does. */
+.task-view-tabs {
+  display: flex;
+  gap: 22px;
+  flex-shrink: 0;
+}
+
+.task-view-tab {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  border: none;
+  /* Transparent rather than absent, so choosing a tab does not move either of them by two pixels. */
+  border-bottom: 2px solid transparent;
+  background: none;
+  padding: 0 0 5px 0;
+  cursor: pointer;
+  font: inherit;
+  font-weight: 600;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: var(--text-faint);
+}
+
+.task-view-tab:hover {
+  color: var(--text-muted);
+}
+
+.task-view-tab.active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+}
+
 /* No room for two columns: the attributes go under the text, and the halves stop being halves — on a screen
    this narrow, scrolling the body is the only thing that works. */
 @media (max-width: 720px) {
-  .task-view {
+  /* Both spellings, or the goal's — two classes — would outrank this one and keep its own split. */
+  .task-view,
+  .task-view.with-tabs {
     grid-template-rows: auto auto;
     overflow-y: auto;
   }
@@ -2473,6 +2527,18 @@ button.task-view-check-row:hover {
   overflow: hidden;
 }
 
+/* A closed release is still on the list — the list is the history — so it has to read as finished without
+   disappearing: dimmed, not hidden. The same two declarations a closed goal's card gets, for the same
+   reason, and with the same effect on a list: the rows still at full strength are the ones whose rollout
+   is not over. */
+.release-card.done {
+  background: var(--surface-2);
+}
+
+.release-card.done .release-title {
+  color: var(--text-muted);
+}
+
 .release-head {
   display: flex;
   align-items: center;
@@ -2822,14 +2888,15 @@ button.task-view-check-row:hover {
   color: var(--text-muted);
 }
 
-/* The releases of a goal, in its dialog. Separated from what is above by a rule rather than boxed, the
-   way the checklist is: they are part of the same goal, not a panel about it. */
+/* The releases of a goal, on their tab in its dialog: the rows of the Releases screen, in a list that
+   scrolls under the tabs the way the thread on the other tab does. */
 .task-view-releases {
-  border-top: 1px solid var(--border);
-  padding-top: 10px;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  overflow-y: auto;
+  min-height: 0;
+  padding-right: 4px;
 }
 
 /* No shadow inside a dialog: the dialog is already the raised surface, and a card lifted off it again is

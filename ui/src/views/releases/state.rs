@@ -1,12 +1,6 @@
 use dioxus_utils::DataState;
 use task_manager_shared::projects::ProjectResponse;
-use task_manager_shared::releases::{ReleaseResponse, is_on_env, same_env};
-
-/// How many services a folded release names before the rest are counted rather than listed.
-///
-/// A row is one line. Three chips say which release this is for nearly every release there is — one
-/// feature rarely touches more — and the count after them says there is more without widening the row.
-pub const SERVICES_ON_A_ROW: usize = 3;
+use task_manager_shared::releases::{ReleaseResponse, is_done, is_on_env, same_env};
 
 /// The two questions the environment filter can ask, as the prefix of its value: `on:Prod` is the releases
 /// that are out on Prod, `not:Prod` the ones that are not there yet. Empty is "any".
@@ -16,6 +10,14 @@ pub const SERVICES_ON_A_ROW: usize = 3;
 /// colon whole, so an environment may be called anything a label may.
 pub const ON_ENV: &str = "on:";
 pub const NOT_ON_ENV: &str = "not:";
+
+/// The two values the state filter can take besides "any", which is the empty string: the releases whose
+/// rollout is still going, and the ones that have been closed.
+///
+/// Strings rather than an enum for the reason the environment filter's are: they are also the values of
+/// the `<option>`s that set them.
+pub const IN_PROGRESS: &str = "open";
+pub const DONE: &str = "done";
 
 #[derive(Default)]
 pub struct ComponentState {
@@ -34,6 +36,10 @@ pub struct ComponentState {
     /// about one board. A board that has no such environment still shows the choice in the control, so
     /// what emptied the list can be seen — see [`envs_to_offer`].
     pub env_filter: String,
+    /// Which releases are on screen by whether they have been closed: [`IN_PROGRESS`], [`DONE`], or
+    /// empty for both. Not reset by `select` either, and for the same reason: "what still has somewhere
+    /// to go" is asked of one board after another.
+    pub done_filter: String,
 }
 
 impl ComponentState {
@@ -65,6 +71,10 @@ impl ComponentState {
 
     pub fn set_env_filter(&mut self, value: String) {
         self.env_filter = value;
+    }
+
+    pub fn set_done_filter(&mut self, value: String) {
+        self.done_filter = value;
     }
 
     /// A push that carried the board: what it says replaces what is shown, with no request.
@@ -101,6 +111,16 @@ pub fn includes_service(release: &ReleaseResponse, microservice_id: &str) -> boo
             .services
             .iter()
             .any(|service| service.microservice_id == microservice_id)
+}
+
+/// Whether a release is on screen under the state filter. Anything that is not one of the two values
+/// shows everything — an empty box and a value this build does not know are the same screen.
+pub fn matches_done_filter(release: &ReleaseResponse, filter: &str) -> bool {
+    match filter {
+        IN_PROGRESS => !is_done(release),
+        DONE => is_done(release),
+        _ => true,
+    }
 }
 
 /// Every environment the releases name, once each however it is cased, sorted ignoring case.
@@ -202,6 +222,7 @@ mod tests {
                 .collect(),
             goals: Vec::new(),
             envs: Vec::new(),
+            done_unix_seconds: None,
             comments: Vec::new(),
             created_unix_seconds: 0,
             updated_unix_seconds: 0,
@@ -239,6 +260,27 @@ mod tests {
             assert!(matches_env_filter(release, ""), "no filter hides nothing");
             assert!(matches_env_filter(release, "a-value-from-a-newer-build"));
             assert!(matches_env_filter(release, "on:"), "a question about nothing is no question");
+        }
+    }
+
+    /// "What still has somewhere to go" and "what is finished" are the two questions closing a release
+    /// exists for, and between them they are every release — nothing is on neither list.
+    #[test]
+    fn a_release_is_either_still_going_out_or_closed() {
+        let going_out = on("RMS-R1", &["Dev"]);
+
+        let mut closed = on("RMS-R2", &["Dev", "Prod"]);
+        closed.done_unix_seconds = Some(1_791_331_200);
+
+        assert!(matches_done_filter(&going_out, IN_PROGRESS));
+        assert!(!matches_done_filter(&going_out, DONE));
+
+        assert!(matches_done_filter(&closed, DONE));
+        assert!(!matches_done_filter(&closed, IN_PROGRESS));
+
+        for release in [&going_out, &closed] {
+            assert!(matches_done_filter(release, ""), "no filter hides nothing");
+            assert!(matches_done_filter(release, "a-value-from-a-newer-build"));
         }
     }
 
@@ -327,6 +369,7 @@ mod tests {
         assert_eq!(state.expanded.len(), 1);
 
         state.set_env_filter("on:Prod".to_string());
+        state.set_done_filter(IN_PROGRESS.to_string());
 
         state.select("TM".to_string());
         assert_eq!(state.selected, "TM");
@@ -335,6 +378,10 @@ mod tests {
         assert_eq!(
             state.env_filter, "on:Prod",
             "\"what is live\" is how the reader wants releases shown, on any board"
+        );
+        assert_eq!(
+            state.done_filter, IN_PROGRESS,
+            "and so is \"what still has somewhere to go\""
         );
     }
 

@@ -336,6 +336,13 @@ releases_list reports the labels a project uses in its own `envs`, and those are
 reuse. Add a label when the rollout has HAPPENED, and take it off with `remove_envs` if the release is \
 pulled back from there.\
 \
+A RELEASE IS CLOSED WHEN ITS ROLLOUT IS OVER. Once it has reached every environment it is going to, pass \
+`done: true` to releases_update — normally in the call that adds the last environment. Every release \
+reports `done`, and `done: false` on releases_list is the short list of releases somebody still has to \
+do something about. It is a statement, not something worked out from `envs`: nothing here knows which \
+environments a project has. Closing is not deleting and not a lock — a closed release stays on every \
+list, and `done: false` reopens it.\
+\
 A RELEASE HAS A THREAD, AND IT IS FOR WHAT HAPPENED. `release_notes` say what changed; \
 releases_add_comment is where the rollout itself is written down — it went clean, a setting was missed \
 and added by hand, it was pulled back and why. `comment` on releases_update does the same in the call \
@@ -556,6 +563,8 @@ mod tests {
                 "datetime",
                 "settings_update_note",
                 envs,
+                // Closing is on both: almost never on the first, the whole point of the second.
+                "done",
             ] {
                 assert!(
                     schema.contains(expected),

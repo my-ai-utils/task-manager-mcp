@@ -324,6 +324,11 @@ pub struct ReleaseFileModel {
     // moment, and has no `envs` at all; it arrives as the label `Prod` — see `build_release`.
     #[serde(default, skip_serializing)]
     pub released_on_prod: Option<String>,
+    // When it was closed, and absent while its rollout is still going. The MOMENT travels rather than a
+    // yes or no, because that is what the board holds: a release closed in March must not arrive saying
+    // it was closed on the day of the import.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub done: Option<String>,
     pub created: String,
     pub updated: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

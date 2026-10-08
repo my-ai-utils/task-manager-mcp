@@ -483,6 +483,7 @@ pub(super) fn release_to_file(project: &ProjectModel, release: &ReleaseModel) ->
         envs: release.envs.clone(),
         // Never written: what it used to say travels as a label in `envs`.
         released_on_prod: None,
+        done: release.done_moment.map(encode_moment),
         created: encode_moment(release.created),
         updated: encode_moment(release.updated),
         deleted: release.deleted_moment.map(encode_moment),

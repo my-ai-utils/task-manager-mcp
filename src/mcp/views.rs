@@ -310,6 +310,14 @@ pub struct ReleaseView {
     )]
     pub envs: Vec<String>,
     #[property(
+        description = "TRUE ONCE THIS RELEASE IS CLOSED — its rollout is over: it has reached every environment it is going to and nothing more is expected to happen to it. False means it is still going out somewhere, and is what `done: false` on releases_list finds. Somebody's statement, not something worked out from `envs`: nothing here knows which environments a project has. Close a release with `done: true` on releases_update once the last environment has actually been rolled"
+    )]
+    pub done: bool,
+    #[property(
+        description = "When it was closed, unix seconds (UTC); absent while it is not. Stamped by the server at the moment it was closed, so it is when somebody SAID the rollout was over. Cleared when the release is reopened"
+    )]
+    pub done_unix_seconds: Option<i64>,
+    #[property(
         description = "How many notes are on the release's thread — how the rollout went, what was noticed afterwards, why it was pulled back. Read them with releases_get_comments. The notes say what changed; the thread says what happened"
     )]
     pub comments_amount: i32,
@@ -353,6 +361,10 @@ impl ReleaseView {
                 .map(|goal| crate::board::compose_goal_handle(&project.prefix, goal.number))
                 .collect(),
             envs: release.envs.clone(),
+            done: release.is_done(),
+            done_unix_seconds: release
+                .done_moment
+                .map(|itm| itm.unix_microseconds / 1_000_000),
             comments_amount: release.comments.len() as i32,
             created_unix_seconds: release.created.unix_microseconds / 1_000_000,
             updated_unix_seconds: release.updated.unix_microseconds / 1_000_000,

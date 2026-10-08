@@ -345,9 +345,10 @@ pub struct ServiceReleaseModel {
 /// list and the notes are on the release: the release says what changed for a reader, each service says
 /// what was deployed.
 ///
-/// There is no state machine. A release has happened by the time it is written down, and two things can
-/// become of it afterwards: it reaches another environment, which is a label on it rather than a second
-/// release — see `envs` — or it is deleted, for one recorded by mistake.
+/// There is next to no state machine. A release has happened by the time it is written down, and three
+/// things can become of it afterwards: it reaches another environment, which is a label on it rather than
+/// a second release — see `envs`; it is closed, once it has reached every one it is going to — see
+/// `done_moment`; or it is deleted, for one recorded by mistake.
 #[derive(Debug, Clone)]
 pub struct ReleaseModel {
     pub project_id: String,
@@ -378,6 +379,21 @@ pub struct ReleaseModel {
     // `EnvsPatch::apply`. Taking a label off is how a release pulled back from an environment stops
     // reading as there.
     pub envs: Vec<String>,
+    // When the release was CLOSED, and `None` while it is still going out.
+    //
+    // Closing says the rollout is over: the release has reached every environment it is going to and
+    // nothing more is expected to happen to it. It is what separates the releases somebody still has to
+    // do something about from the history under them.
+    //
+    // **A statement, not something derived from `envs`.** Nothing here knows which environments a project
+    // has — a label exists only for as long as some release carries it — so "on all of them" cannot be
+    // computed, only said by whoever rolled it out. For the same reason nothing is enforced the other
+    // way: a closed release can still be put on an environment or taken off one. It is a mark, not a lock.
+    //
+    // A moment and not a bool, the way `close_moment` on a goal and `deleted_moment` are: "is it done" and
+    // "since when" are one fact, and two fields for it could disagree. Stamped when the release is
+    // closed, kept if it is closed again, and cleared whole when it is reopened.
+    pub done_moment: Option<DateTimeAsMicroseconds>,
     // What was said about the release: how the rollout went, what was noticed afterwards, why it was
     // pulled back. The same shape as a goal's thread and a task's, and it rides on the row for the same
     // reason — one atomic write per comment. The notes above say what CHANGED; this says what HAPPENED.
@@ -393,6 +409,11 @@ pub struct ReleaseModel {
 impl ReleaseModel {
     pub fn is_deleted(&self) -> bool {
         self.deleted_moment.is_some()
+    }
+
+    /// Whether it has been closed. Derived, so it cannot disagree with the moment.
+    pub fn is_done(&self) -> bool {
+        self.done_moment.is_some()
     }
 
     /// Whether it is out on an environment, by that environment's label — in any case.

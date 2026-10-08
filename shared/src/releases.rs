@@ -82,6 +82,13 @@ pub struct ReleaseResponse {
     // ignoring case — ask through `is_on_env` rather than with `contains`.
     #[serde(default)]
     pub envs: Vec<String>,
+    // When the release was CLOSED, and absent while it is still going out. Closing says the rollout is
+    // over: it has reached every environment it is going to. That is somebody's statement and not
+    // something worked out from `envs` — nothing here knows the list of environments a project has, so
+    // "on all of them" cannot be computed, only said. One field for "is it done" and "since when", so the
+    // two cannot disagree: read the first with `is_done`.
+    #[serde(default)]
+    pub done_unix_seconds: Option<i64>,
     // The release's thread, oldest first — what was said about the rollout, as opposed to `release_notes`,
     // which say what changed. The same shape a task's and a goal's thread travel in.
     #[serde(default)]
@@ -139,6 +146,15 @@ pub fn same_env(left: &str, right: &str) -> bool {
 /// Whether a release is out on an environment.
 pub fn is_on_env(release: &ReleaseResponse, env: &str) -> bool {
     release.envs.iter().any(|itm| same_env(itm, env))
+}
+
+/// Whether a release has been closed — its rollout is over.
+///
+/// A function over the one field rather than a second field beside it: a bool on the wire next to the
+/// moment would be two statements of one fact, and the first build to set one and forget the other would
+/// draw a release that is and is not done.
+pub fn is_done(release: &ReleaseResponse) -> bool {
+    release.done_unix_seconds.is_some()
 }
 
 /// Whether a label names production.
@@ -234,6 +250,7 @@ mod tests {
             services,
             goals: Vec::new(),
             envs: Vec::new(),
+            done_unix_seconds: None,
             comments: Vec::new(),
             created_unix_seconds: 0,
             updated_unix_seconds: 0,
@@ -254,7 +271,13 @@ mod tests {
 
         assert!(read.envs.is_empty());
         assert!(!is_on_env(&read, "Prod"));
+        assert!(!is_done(&read), "a release nobody closed is still going out");
         assert!(read.comments.is_empty());
+
+        let mut closed = release(Vec::new());
+        closed.done_unix_seconds = Some(MIDNIGHT);
+
+        assert!(is_done(&closed));
     }
 
     /// A label is found however it is spelled, and only when it is the WHOLE label: `Prod` must not

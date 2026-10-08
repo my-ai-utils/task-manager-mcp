@@ -95,6 +95,11 @@ pub struct ReleaseDto {
     // nothing has to be migrated for that either.
     #[sql_type("timestamp")]
     pub released_on_prod_moment: Option<DateTimeAsMicroseconds>,
+    // When the release was closed — its rollout over; NULL while it is still going out. A moment rather
+    // than a flag for the reason `deleted_moment` is, and nullable by its nature, which is also what lets
+    // the column arrive on a table that already has rows.
+    #[sql_type("timestamp")]
+    pub done_moment: Option<DateTimeAsMicroseconds>,
     #[sql_type("timestamp")]
     pub created: DateTimeAsMicroseconds,
     #[sql_type("timestamp")]

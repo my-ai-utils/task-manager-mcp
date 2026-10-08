@@ -1,16 +1,13 @@
 use dioxus::prelude::*;
 use dioxus_utils::RenderState;
-use task_manager_shared::goals::GoalResponse;
-use task_manager_shared::kind_color::KindColor;
 use task_manager_shared::projects::ProjectResponse;
-use task_manager_shared::releases::{ReleaseGoalResponse, ReleaseResponse, moment_for_display};
+use task_manager_shared::releases::ReleaseResponse;
 
-use crate::dialogs::DialogState;
 use crate::states::AppState;
 
 use super::{
-    ComponentState, NOT_ON_ENV, ON_ENV, SERVICES_ON_A_ROW, envs_to_offer, filter_asks,
-    includes_service, matches_env_filter, microservices_of,
+    ComponentState, DONE, IN_PROGRESS, NOT_ON_ENV, ON_ENV, envs_to_offer, filter_asks,
+    includes_service, matches_done_filter, matches_env_filter, microservices_of,
 };
 
 /// What has gone out, newest first.
@@ -106,11 +103,13 @@ pub fn RenderReleases() -> Element {
 
     let service_filter = cs_ra.service_filter.as_str();
     let env_filter = cs_ra.env_filter.as_str();
+    let done_filter = cs_ra.done_filter.as_str();
 
     let shown: Vec<ReleaseResponse> = releases
         .iter()
         .filter(|release| includes_service(release, service_filter))
         .filter(|release| matches_env_filter(release, env_filter))
+        .filter(|release| matches_done_filter(release, done_filter))
         .cloned()
         .collect();
 
@@ -140,11 +139,14 @@ pub fn RenderReleases() -> Element {
 
             div { class: "releases-list",
                 for release in shown.iter() {
-                    RenderRelease {
+                    // The row a goal's dialog draws its releases with too — see `ReleaseRow`. Here it
+                    // names the goal each one shipped, which is what says which feature it was.
+                    crate::dialogs::ReleaseRow {
                         key: "{release.id}",
                         release: release.clone(),
                         open: expanded.contains(&release.id),
-                        cs,
+                        with_goals: true,
+                        on_toggle: move |id: String| cs.write().toggle(&id),
                     }
                 }
             }
@@ -258,6 +260,7 @@ fn RenderHeader(
     let selected_prefix = cs_ra.selected.clone();
     let service_filter = cs_ra.service_filter.clone();
     let env_filter = cs_ra.env_filter.clone();
+    let done_filter = cs_ra.done_filter.clone();
     drop(cs_ra);
 
     let mut cs = cs;
@@ -320,238 +323,22 @@ fn RenderHeader(
                         }
                     }
                 }
-            }
-        }
-    }
-}
-
-/// One release, folded to a line or open.
-#[component]
-fn RenderRelease(release: ReleaseResponse, open: bool, cs: Signal<ComponentState>) -> Element {
-    let mut cs = cs;
-
-    let release_id = release.id.clone();
-    let date = moment_for_display(release.date_unix_seconds);
-
-    let more_services = release.services.len().saturating_sub(SERVICES_ON_A_ROW);
-
-    // Every service by name and version, for the tooltip on the count — the folded row shows three and
-    // this is what says which the others are without opening it.
-    let all_services = release
-        .services
-        .iter()
-        .map(|itm| format!("{} {}", itm.microservice_id, itm.version))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    rsx! {
-        div { class: "release-card",
-            div {
-                class: "release-head",
-                onclick: move |_| cs.write().toggle(&release_id),
-
-                span { class: "goal-caret", if open { "▾" } else { "▸" } }
-
-                div { class: "release-head-text",
-                    // The handle first and the title after it, in the order a goal's row and a task's
-                    // sticker put them — this is the id that goes into `add_releases` on a goal.
-                    span { class: "goal-id", "{release.id}" }
-                    div { class: "release-title", "{release.title}" }
-                }
-
-                div { class: "release-meta",
-                    // The goal it shipped, in that goal's own colour — by id alone. The name is in the
-                    // tooltip and in the open release: on one line it was competing for room with the
-                    // versions, and a release's own title usually says what the goal's would.
-                    for goal in release.goals.iter() {
-                        RenderReleaseGoal {
-                            key: "{goal.id}",
-                            goal: goal.clone(),
-                            project: release.project.clone(),
-                            named: false,
-                        }
+                // Whether a release's rollout is over. `In progress` is the short list this screen is
+                // opened for by whoever is rolling things out: everything recorded that still has
+                // somewhere to go. It is not the same question as an environment — which environments
+                // there are differs from board to board, and "everywhere it is going" is somebody's
+                // statement about a release, not a label on it.
+                select {
+                    onchange: move |event| cs.write().set_done_filter(event.value()),
+                    option { value: "", selected: done_filter.is_empty(), "Any state" }
+                    option {
+                        value: IN_PROGRESS,
+                        selected: done_filter == IN_PROGRESS,
+                        "In progress"
                     }
-
-                    crate::dialogs::ReleaseEnvs { release: release.clone() }
-                    crate::dialogs::ReleaseSettingsFlag { release: release.clone() }
-
-                    for service in release.services.iter().take(SERVICES_ON_A_ROW) {
-                        span {
-                            class: "release-service-chip",
-                            key: "{service.microservice_id}",
-                            title: "{service.microservice_id} {service.version}",
-                            span { class: "release-service-chip-name", "{service.microservice_id}" }
-                            span { class: "release-service-chip-version", "{service.version}" }
-                        }
-                    }
-
-                    if more_services > 0 {
-                        span { class: "release-more", title: "{all_services}", "+{more_services}" }
-                    }
-
-                    // Drawn only when there is one, like the same count on a goal's row.
-                    if !release.comments.is_empty() {
-                        span {
-                            class: "goal-comments",
-                            title: "{release.comments.len()} notes on the thread — open the release to read them",
-                            "💬 {release.comments.len()}"
-                        }
-                    }
-
-                    span { class: "release-date", "{date}" }
-
-                    // Last, so it is in one place down the list: the way to this release's own page,
-                    // and so to an address that can be handed to somebody.
-                    crate::dialogs::ReleaseOpenLink { release: release.clone() }
-                }
-            }
-
-            if open {
-                div { class: "release-body",
-                    // Which feature this was, in full. Here and not inside `ReleaseDetails`, because
-                    // that body is also drawn under the goal itself, where naming the goal would be
-                    // telling the reader what dialog they are in.
-                    if !release.goals.is_empty() {
-                        div { class: "release-goals",
-                            for goal in release.goals.iter() {
-                                RenderReleaseGoal {
-                                    key: "{goal.id}",
-                                    goal: goal.clone(),
-                                    project: release.project.clone(),
-                                    named: true,
-                                }
-                            }
-                        }
-                    }
-
-                    crate::dialogs::ReleaseDetails { release: release.clone() }
+                    option { value: DONE, selected: done_filter == DONE, "Done" }
                 }
             }
         }
     }
-}
-
-/// A goal a release shipped, as a chip edged in that goal's colour — and the way into the goal.
-///
-/// `named` is the one difference between the places it is drawn: the folded row has room for the id only
-/// and says the name in a tooltip, the open release and the release's own page spell it out.
-#[component]
-pub fn RenderReleaseGoal(goal: ReleaseGoalResponse, project: String, named: bool) -> Element {
-    let app_state = consume_context::<Signal<AppState>>();
-
-    let color = KindColor::parse_or_default(&goal.color).hex();
-    let tooltip = if named {
-        String::new()
-    } else {
-        format!("{} · {}", goal.id, goal.name)
-    };
-
-    let goal_id = goal.id.clone();
-
-    rsx! {
-        span {
-            class: "release-goal",
-            style: "border-left-color: {color}",
-            title: "{tooltip}",
-            span { class: "goal-id", "{goal.id}" }
-            if named {
-                span { "{goal.name}" }
-            }
-
-            // The eye a goal's own row ends with, opening the dialog that one opens. `stop_propagation`
-            // for the reason it is there too: on the folded row this chip sits inside the head, the head
-            // folds the release, and one click must do one thing.
-            button {
-                class: "sticker-view",
-                title: "Read this goal and its comments",
-                onclick: move |event| {
-                    event.stop_propagation();
-                    open_goal(app_state, project.clone(), goal_id.clone());
-                },
-                "👁"
-            }
-        }
-    }
-}
-
-/// Opens a goal a release names, in the dialog the eye on that goal's own row opens.
-///
-/// A release holds its goal by id, name and colour — enough for the chip, not for the dialog. The rest is
-/// the board, and it is usually already here: the push this screen is drawn from carries the goals and the
-/// tasks beside the releases, so the dialog opens with no request and from the same revision as the row
-/// that was clicked.
-///
-/// **Usually, and not always — a release is exactly the thing that outlives its goal.** A push carries the
-/// LIVE goals; one closed longer ago than the project's archive window is not among them, and that is the
-/// ordinary state of a goal whose release is a month old. So a goal the push does not hold is asked of the
-/// server, archive included — as is every goal when there is no push to look in, which is the first
-/// moment of a cold load and any tab whose socket has dropped.
-fn open_goal(app_state: Signal<AppState>, project: String, goal_id: String) {
-    let pushed = {
-        let app_ra = app_state.read();
-
-        app_ra
-            .board_push
-            .as_ref()
-            .filter(|snapshot| snapshot.project == project)
-            .and_then(|snapshot| {
-                crate::views::goals::find_goal_with_status(
-                    &snapshot.goals,
-                    &snapshot.tasks,
-                    &goal_id,
-                )
-            })
-    };
-
-    if let Some((goal, status)) = pushed {
-        crate::dialogs::open(view_goal(goal, status));
-        return;
-    }
-
-    spawn(async move {
-        let dialog = match read_goal(&project, &goal_id).await {
-            Ok(Some((goal, status))) => view_goal(goal, status),
-            // A release does not list a goal that has been deleted, so this is a goal deleted between
-            // the list being read and the eye being clicked. Said, rather than a click that does nothing.
-            Ok(None) => DialogState::Message {
-                title: goal_id,
-                text: "This goal is not on the board any more.".to_string(),
-            },
-            Err(message) => DialogState::Message {
-                title: goal_id,
-                text: message,
-            },
-        };
-
-        crate::dialogs::open(dialog);
-    });
-}
-
-fn view_goal(goal: GoalResponse, status: &str) -> DialogState {
-    DialogState::ViewGoal {
-        goal,
-        status: status.to_string(),
-    }
-}
-
-/// One goal by id, read from the server with the tasks its status is derived from.
-///
-/// Both lists whole, archive included: the goal is being asked for BECAUSE it may have left the live
-/// list, and its status is a statement about its tasks — the same ones the Goals screen reads, so the two
-/// cannot answer differently. Asked for together, since neither needs the other to be sent.
-async fn read_goal(
-    project: &str,
-    goal_id: &str,
-) -> Result<Option<(GoalResponse, &'static str)>, String> {
-    let (goals, tasks) = futures::join!(
-        crate::api::get_goals(project, true),
-        crate::api::get_tasks(project, true),
-    );
-
-    let goals = goals.map_err(|err| err.message)?.goals;
-    let tasks = tasks.map_err(|err| err.message)?.tasks;
-
-    Ok(crate::views::goals::find_goal_with_status(
-        &goals, &tasks, goal_id,
-    ))
 }

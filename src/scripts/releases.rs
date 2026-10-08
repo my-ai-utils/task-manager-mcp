@@ -412,6 +412,10 @@ pub struct NewRelease {
     /// Empty is a release written down before it has gone anywhere, or by somebody who does not know; the
     /// rest are added with `ReleasePatch` as it reaches them.
     pub envs: Vec<String>,
+    /// Whether its rollout is already over as it is recorded. Almost always `false` when a release is
+    /// first written down — it has somewhere still to go — and `true` for one written down afterwards,
+    /// when it was everywhere long ago.
+    pub done: bool,
 }
 
 /// A change to a release. Every field is optional; `None` means "leave it alone".
@@ -424,6 +428,9 @@ pub struct ReleasePatch {
     pub services: ServicesPatch,
     /// The environments to put the release on and to take it off — see [`EnvsPatch::apply`].
     pub envs: EnvsPatch,
+    /// `Some(true)` closes the release — its rollout is over — `Some(false)` reopens it, `None` leaves
+    /// it alone. See [`mark_done`].
+    pub done: Option<bool>,
     /// `Some(false)` brings a deleted release back. `Some(true)` deletes it, which `delete_release` also
     /// does — both are here for the reason they are both on a goal's patch.
     pub deleted: Option<bool>,
@@ -443,6 +450,7 @@ impl ReleasePatch {
             && self.date.is_none()
             && self.services.is_empty()
             && self.envs.is_empty()
+            && self.done.is_none()
             && self.deleted.is_none()
             && self.trimmed_comment().is_none()
     }
@@ -453,6 +461,27 @@ impl ReleasePatch {
             .as_deref()
             .map(str::trim)
             .filter(|itm| !itm.is_empty())
+    }
+}
+
+/// The closed mark after a change to it.
+///
+/// **Stamped once and cleared whole**, the way a deletion is. Closing a release that is already closed
+/// must not move the moment — that is when its rollout ended, and a second call saying the same thing is
+/// not a second ending. Reopening leaves nothing behind, so a release reopened because it has somewhere
+/// still to go stops answering to "what is done" at once, and closing it again later is dated by when it
+/// was closed again.
+///
+/// Its own function because it is the whole of the rule and has no need of an `AppContext` to be tested.
+fn mark_done(
+    current: Option<DateTimeAsMicroseconds>,
+    wanted: Option<bool>,
+    now: DateTimeAsMicroseconds,
+) -> Option<DateTimeAsMicroseconds> {
+    match wanted {
+        Some(true) => current.or(Some(now)),
+        Some(false) => None,
+        None => current,
     }
 }
 
@@ -668,6 +697,7 @@ pub async fn create_release(app: &AppContext, new_release: NewRelease) -> Result
         date,
         services,
         envs,
+        done_moment: mark_done(None, Some(new_release.done), now),
         comments: Vec::new(),
         created: now,
         updated: now,
@@ -723,8 +753,8 @@ async fn attach_to_goal(
     app.board.upsert_goal(goal);
 }
 
-/// Change a release: its texts, its date, the services in it, the environments it is out on, or whether it
-/// is deleted. Returns its handle.
+/// Change a release: its texts, its date, the services in it, the environments it is out on, whether its
+/// rollout is over, or whether it is deleted. Returns its handle.
 pub async fn update_release(
     app: &AppContext,
     handle: &str,
@@ -732,7 +762,7 @@ pub async fn update_release(
 ) -> Result<String, String> {
     if patch.is_empty() {
         return Err(
-            "nothing to update: pass at least one of title, description, release_notes, date, a service to add or remove, an environment to add or remove, deleted or comment"
+            "nothing to update: pass at least one of title, description, release_notes, date, a service to add or remove, an environment to add or remove, done, deleted or comment"
                 .to_string(),
         );
     }
@@ -775,6 +805,11 @@ pub async fn update_release(
     if let Some(comment) = comment {
         release.comments.push(comment);
     }
+
+    // Not checked against `envs`: which environments a project has is nowhere written down, so whether
+    // a release is on all of them is the caller's to say — and a release closed with nothing on it at
+    // all is still a legitimate record of one that was never tracked by environment.
+    release.done_moment = mark_done(release.done_moment, patch.done, now);
 
     // Stamped once and cleared whole, exactly as on a task and a goal.
     match patch.deleted {
@@ -1209,6 +1244,29 @@ mod tests {
         assert_eq!(out, vec!["Pre-Prod-EU", "Прод"], "trimmed, and not held to ASCII");
     }
 
+    /// The moment is when the rollout ENDED. Saying so twice is not a second ending, and reopening has to
+    /// leave nothing behind — a release with somewhere still to go must stop answering to "what is done",
+    /// and one closed again is dated by when that happened.
+    #[test]
+    fn the_done_mark_is_stamped_once_and_cleared_whole() {
+        assert_eq!(mark_done(None, None, now(100)), None);
+        assert_eq!(mark_done(None, Some(false), now(100)), None);
+
+        let closed = mark_done(None, Some(true), now(100));
+        assert_eq!(closed, Some(now(100)));
+
+        assert_eq!(
+            mark_done(closed, Some(true), now(500)),
+            Some(now(100)),
+            "closing it again must not move when it was closed"
+        );
+        assert_eq!(mark_done(closed, None, now(500)), Some(now(100)));
+
+        let reopened = mark_done(closed, Some(false), now(600));
+        assert_eq!(reopened, None);
+        assert_eq!(mark_done(reopened, Some(true), now(700)), Some(now(700)));
+    }
+
     /// Text without an author is refused, as on a goal: a thread about a rollout is read to find out who
     /// saw what, and an anonymous line in it answers neither.
     #[test]
@@ -1250,6 +1308,11 @@ mod tests {
             },
             ReleasePatch {
                 envs: envs(&["Dev"], &[]),
+                ..Default::default()
+            },
+            // Reopening is a change too: `Some(false)` must not be read as "nothing passed".
+            ReleasePatch {
+                done: Some(false),
                 ..Default::default()
             },
             ReleasePatch {
@@ -1302,6 +1365,7 @@ mod tests {
             date: now(number),
             services: Vec::new(),
             envs: Vec::new(),
+            done_moment: None,
             comments: Vec::new(),
             created: now(0),
             updated: now(0),

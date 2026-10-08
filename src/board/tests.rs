@@ -141,6 +141,8 @@ fn release(project_id: &str, number: i64, day: i64) -> ReleaseModel {
         services: Vec::new(),
         // Out nowhere in particular and nothing said about it. The test about environments puts labels on.
         envs: Vec::new(),
+        // Still going out. Whether a release is closed is not something the board derives from.
+        done_moment: None,
         comments: Vec::new(),
         created: DateTimeAsMicroseconds::new(0),
         updated: DateTimeAsMicroseconds::new(0),

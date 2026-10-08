@@ -874,6 +874,9 @@ fn build_release(
         date: decode_moment(&src.date, "a release's date")?,
         services,
         envs: envs_of_file(src),
+        // The moment it was closed THERE, kept — an import is not the end of a rollout, and a release
+        // closed in March must not arrive saying it was closed today.
+        done_moment: decode_optional_moment(src.done.as_deref(), "a release's done")?,
         // Its thread out of the same map the cards take theirs from: `comments.yaml` names what a comment
         // is on by handle, and a release's handle is as unambiguous as a task's.
         comments: comments.remove(&handle).unwrap_or_default(),
@@ -1989,6 +1992,9 @@ mod tests {
             // On a test stand and then on production, in that order — the order is part of the record, and
             // neither label is spelled the way an importer would normalise it to.
             envs: vec!["dev-2".to_string(), "Prod".to_string()],
+            // Closed two days after it first went out — a fourth moment unlike the others, so it cannot
+            // arrive as `date`, as `created` or as the day of the import and still pass.
+            done_moment: Some(moment("2026-10-09T16:20:00.000000Z")),
             // Left empty here: a thread does not travel in `releases.yaml`. The tests that are about it
             // put one in `comments.yaml`, which is where the export writes it.
             comments: Vec::new(),
@@ -2019,6 +2025,7 @@ mod tests {
         assert_eq!(landed.services, left.services);
         // Where it is out, in the order it got there and spelled as the source board spelled it.
         assert_eq!(landed.envs, left.envs);
+        assert_eq!(landed.done_moment, left.done_moment);
         assert_eq!(landed.created, left.created);
         assert_eq!(landed.updated, left.updated);
         assert_eq!(landed.deleted_moment, left.deleted_moment);
@@ -2613,6 +2620,12 @@ mod tests {
             "the link to the build, whole"
         );
         assert_eq!(landed.services[1].release_link, "", "and no link where there was none");
+        assert!(landed.is_done());
+        assert_eq!(
+            landed.done_moment,
+            Some(moment("2026-10-09T16:20:00.000000Z")),
+            "when its rollout ended THERE"
+        );
 
         assert_eq!(landed.comments.len(), 2);
 
@@ -2632,6 +2645,7 @@ mod tests {
     fn a_release_out_nowhere_arrives_out_nowhere() {
         let mut staged = a_release(12);
         staged.envs.clear();
+        staged.done_moment = None;
 
         let file = release_to_file(&a_source_project(), &staged);
         let written = serde_yaml::to_string(&file).unwrap();
@@ -2639,6 +2653,12 @@ mod tests {
         assert!(
             !written.contains("envs"),
             "an empty list is left out of the file rather than written as []: {written}"
+        );
+        // The key at the start of a line, not the bare word: the file is full of base64, and four
+        // letters can turn up in that by accident.
+        assert!(
+            !written.contains("\ndone:"),
+            "a release still going out says nothing about being done: {written}"
         );
         assert!(
             !written.contains("released_on_prod"),
@@ -2654,6 +2674,7 @@ mod tests {
         .expect("the release should build");
 
         assert!(landed.envs.is_empty());
+        assert!(!landed.is_done());
         assert!(landed.comments.is_empty());
     }
 

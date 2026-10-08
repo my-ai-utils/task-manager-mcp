@@ -25,6 +25,18 @@
   overflow: hidden;
 }
 
+/* A closed release is still on the list — the list is the history — so it has to read as finished without
+   disappearing: dimmed, not hidden. The same two declarations a closed goal's card gets, for the same
+   reason, and with the same effect on a list: the rows still at full strength are the ones whose rollout
+   is not over. */
+.release-card.done {
+  background: var(--surface-2);
+}
+
+.release-card.done .release-title {
+  color: var(--text-muted);
+}
+
 .release-head {
   display: flex;
   align-items: center;
@@ -374,14 +386,15 @@
   color: var(--text-muted);
 }
 
-/* The releases of a goal, in its dialog. Separated from what is above by a rule rather than boxed, the
-   way the checklist is: they are part of the same goal, not a panel about it. */
+/* The releases of a goal, on their tab in its dialog: the rows of the Releases screen, in a list that
+   scrolls under the tabs the way the thread on the other tab does. */
 .task-view-releases {
-  border-top: 1px solid var(--border);
-  padding-top: 10px;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  overflow-y: auto;
+  min-height: 0;
+  padding-right: 4px;
 }
 
 /* No shadow inside a dialog: the dialog is already the raised surface, and a card lifted off it again is

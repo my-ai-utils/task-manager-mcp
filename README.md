@@ -430,6 +430,17 @@ written since still has that and a NULL `envs`, and it loads as the label `Prod`
 real array and empties the old column, so it drains as rows are touched, and the schema sync never drops
 a column, so the field can simply be deleted from the row model once nothing predates `envs`.
 
+**A release is closed when its rollout is over.** `done` on `releases_update` says it has reached every
+environment it is going to and nothing more is expected to happen to it; `done: false` on `releases_list`,
+and `In progress` on the Releases screen, is then the short list of releases somebody still has to do
+something about, with the history out of the way under it. It is a **statement, not something worked out
+from `envs`**: nothing knows which environments a project has, so "on all of them" cannot be computed,
+only said by whoever rolled it out. For the same reason it is a mark and not a lock — a closed release
+can still be put on an environment or taken off one, and `done: false` reopens it. Stored as a moment,
+`done_moment`, the way a goal's `close_moment` is: stamped when the release is closed, kept if it is
+closed again, cleared whole when it is reopened. A closed release stays on every list; the screen dims it
+the way it dims a closed goal.
+
 **`release_link` is a link somebody pasted, and it is held to being one.** When CI built what went out,
 the service entry carries where that build can be looked at — the url of the GitHub release, or of the
 workflow run that built the image — so the build is one click from the record of it. Nothing here talks
@@ -486,12 +497,21 @@ would leave a goal pointing at a number that names nothing.
 
 In the browser there is a **Releases** tab: one row per release, newest first, folded to its id, title,
 the id of the goal it shipped (in that goal's colour), a chip per environment it is out on — production's
-filled green, the rest outlined — a settings flag when one is due, up to three `service version` chips, a
-count of the notes on its thread, and the date; a click opens the goal's name, the services table, the
-notes and the thread. Two filters narrow the list — to one microservice, and to what is or is not on an
-environment — and together they put the version of a service that is live at the top. A goal's dialog
-shows the releases it went out in under its text, open, and a goal that has shipped carries a `🚀` count
-on the Goals screen. All of it read-only — a release is recorded, labelled and commented through `/mcp`.
+filled green, the rest outlined — a `Done` pill once it is closed, a settings flag when one is due, up to
+three `service version` chips, a count of the notes on its thread, and the date; a click opens the goal's
+name, the services table, the notes and the thread. Three filters narrow the list — to one microservice,
+to what is or is not on an environment, and to what is still in progress or done — and together they put
+the version of a service that is live at the top. A goal that has shipped carries a `🚀` count on the
+Goals screen. All of it read-only — a release is recorded, labelled, closed and commented through `/mcp`.
+
+**A goal's dialog has two tabs under its text: Comments and Releases.** They are two readings of the same
+goal — why the work looks the way it does, and what came of it — and stacked one above the other a goal
+that had shipped pushed its own conversation off the bottom of the dialog. The Releases tab is the rows of
+the Releases screen, drawn by the same component and folded the same way; a goal's only release is shown
+open, several are a list to pick from. The dialog opens on the thread unless there is nothing on it and
+there is a release to show instead. And the split is no longer a fixed share, as it is for a task: the
+text takes what it needs and no more than 55% of the dialog, so a goal with two lines of description does
+not hold most of the window empty above its releases.
 
 **The goal a release shipped can be opened from the release.** The chip carries the eye a goal's own row
 has, and it opens the same dialog. A release holds its goal by id, name and colour only, so the rest
@@ -1222,7 +1242,8 @@ A release is renumbered the same way and out of the same reservation, since the 
 tasks, goals and releases from one counter exactly as the source did — and a goal's `releases: [TM-R12]` is
 remapped onto the new numbers. Its thread is in `comments.yaml` with every other, named by its handle, and
 the environments it is out on cross as the labels they were, in the order it reached them and spelled as
-the source board spelled them — an import carries a board across, it does not merge two vocabularies. An
+the source board spelled them — an import carries a board across, it does not merge two vocabularies.
+Whether it was closed crosses as the moment it was closed. An
 archive exported by 0.2.0 has no labels and may say `released_on_prod` instead; that arrives as the label
 `Prod`. A **deleted** release is carried too, still listed by its goals: a goal goes
 on listing a release that has been deleted so that bringing it back puts it on the goal again, and that only
@@ -1549,7 +1570,8 @@ Tools:
   for what is and is not out on an environment, newest first; it is capped by `limit` because nothing
   ages off it, and reports the environment labels the project uses. `envs` on `releases_create` and
   `add_envs` / `remove_envs` on `releases_update` say where a release is out — a label on it, not a
-  second release — and each service takes a `release_link` to the build that produced it. See
+  second release — `done` closes one whose rollout is over (`done: false` on `releases_list` is what
+  still has somewhere to go), and each service takes a `release_link` to the build that produced it. See
   [Releases](#releases--the-record-of-what-went-out).
 - `releases_add_comment` / `releases_get_comments` — the release's thread: how the rollout went, as
   opposed to its notes, which say what changed.

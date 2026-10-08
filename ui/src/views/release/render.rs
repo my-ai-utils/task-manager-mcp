@@ -1,6 +1,6 @@
 use dioxus::prelude::*;
 use dioxus_utils::RenderState;
-use task_manager_shared::releases::{ReleaseResponse, moment_for_display};
+use task_manager_shared::releases::{ReleaseResponse, is_done, moment_for_display};
 
 use crate::AppRoute;
 use crate::states::AppState;
@@ -122,7 +122,7 @@ pub fn RenderReleasePage(project: String, release: String) -> Element {
                 }
             }
 
-            div { class: "release-card",
+            div { class: if is_done(release) { "release-card done" } else { "release-card" },
                 div { class: "release-head static",
                     div { class: "release-head-text",
                         // Which feature this was — by name here, where the folded row of the list has
@@ -131,7 +131,7 @@ pub fn RenderReleasePage(project: String, release: String) -> Element {
                             span { class: "field-hint", "Not attached to a goal" }
                         }
                         for goal in release.goals.iter() {
-                            crate::views::releases::RenderReleaseGoal {
+                            crate::dialogs::ReleaseGoalChip {
                                 key: "{goal.id}",
                                 goal: goal.clone(),
                                 project: release.project.clone(),
@@ -141,6 +141,7 @@ pub fn RenderReleasePage(project: String, release: String) -> Element {
                     }
                     div { class: "release-meta",
                         crate::dialogs::ReleaseEnvs { release: release.clone() }
+                        crate::dialogs::ReleaseDoneFlag { release: release.clone() }
                         crate::dialogs::ReleaseSettingsFlag { release: release.clone() }
                         span { class: "release-date", "{date}" }
                     }

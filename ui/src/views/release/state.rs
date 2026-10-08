@@ -124,6 +124,7 @@ mod tests {
             services: Vec::new(),
             goals: Vec::new(),
             envs: Vec::new(),
+            done_unix_seconds: None,
             comments: Vec::new(),
             created_unix_seconds: 0,
             updated_unix_seconds: 0,

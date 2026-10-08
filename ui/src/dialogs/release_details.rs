@@ -196,6 +196,30 @@ pub fn ReleaseEnvs(release: ReleaseResponse) -> Element {
     }
 }
 
+/// The mark on a release that has been closed — its rollout is over.
+///
+/// The pill a finished goal carries, in its green and under its word, because it is the same statement
+/// about a release that `Done` is about a goal: nothing more is going to happen here. Drawn after the
+/// environments, where it reads as their conclusion — out on these, and that is all of them.
+///
+/// Nothing for a release that is still going out. That is how every release starts, so the absence is
+/// the ordinary state; what marks the ones still in flight is that they are NOT dimmed, see
+/// `.release-card.done`.
+#[component]
+pub fn ReleaseDoneFlag(release: ReleaseResponse) -> Element {
+    let Some(since) = release.done_unix_seconds else {
+        return rsx! {};
+    };
+
+    rsx! {
+        span {
+            class: "goal-status done",
+            title: "Closed on {moment_for_display(since)} — it has reached every environment it was going to",
+            "Done"
+        }
+    }
+}
+
 /// The way from a release to its own page, in a new tab.
 ///
 /// A release has an address — `release/{project}/{id}` — so that it can be handed to somebody as a link,
