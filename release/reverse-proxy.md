@@ -54,7 +54,7 @@ ssl_certificates:
 
 `127.0.0.1:31500` rather than the container name. The proxy is on the same host and the port is
 published, so this works whether or not the proxy sits on `docker_net`. If it does, and you would rather
-not publish the port at all, swap the upstream for `http://task-manager:8000` and delete the `ports:`
+not publish the port at all, swap the upstream for `http://task-manager-mcp:8000` and delete the `ports:`
 block from the compose — one less surface exposed on the host.
 
 Unix sockets are not an option here: the service does create one, but my-reverse-proxy's unix-socket HTTP

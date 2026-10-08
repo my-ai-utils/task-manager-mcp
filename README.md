@@ -1682,7 +1682,8 @@ email.
 
 ## Running it
 
-Runs on **HETZNER** as one container, `task-manager`, product namespace `task-manager-mcp`. One host
+Runs on **HETZNER** as one container, `task-manager-mcp` — named after the product, whose namespace
+and release-mcp stack (`services/task-manager-mcp`) carry the same name. One host
 port from the **31500+** range: `31500 → 8000`. The container port is not arbitrary — service-sdk's HTTP
 server listens on 8000 (8888 is its second, technical port).
 
@@ -1706,8 +1707,9 @@ configure, and the reverse proxy has one upstream: see `release/reverse-proxy.md
 The settings template is still called `task-manager-rest-api`, the name the server had while the client
 was a container of its own. It is a record in settings-service and was left alone on purpose — renaming
 a crate is not a reason to make a deploy wait on a rename in another system. The same goes for nothing
-else: the image, the container, the unix socket and the name the service logs under are all
-`task-manager` now.
+else: the image, the unix socket and the name the service logs under are all `task-manager` now, after
+the crate. The container is the one thing named after the product instead — `task-manager-mcp`, and
+with it the compose service and the hostname on `docker_net`.
 
 Once it is up, register the MCP surface with the client that will work the board:
 

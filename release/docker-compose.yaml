@@ -22,10 +22,10 @@
 # technical port). The host port comes from the 31500+ range reserved for this product; 31501, which the
 # client's own container used to publish, is free again.
 services:
-  task-manager:
+  task-manager-mcp:
     image: ghcr.io/my-ai-utils/task-manager:0.2.0
-    hostname: task-manager
-    container_name: task-manager
+    hostname: task-manager-mcp
+    container_name: task-manager-mcp
     restart: always
     environment:
     # TCP, not the unix socket, because the settings-service holding this product is on ANOTHER machine.
