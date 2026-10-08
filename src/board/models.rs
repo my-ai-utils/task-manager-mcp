@@ -317,6 +317,11 @@ pub struct ServiceReleaseModel {
     // The commit this version was built from, lower-cased hex. The half of the entry that outlives a
     // version number: a tag can be moved, and this cannot.
     pub git_hash: String,
+    // Where the build of this version can be looked at — the GitHub release, or the run of the workflow
+    // that built the image. A link and nothing more: nothing here talks to GitHub, so this is what
+    // whoever recorded the release pasted. Empty when there is none, which is the ordinary state of a
+    // service that was built and rolled out by hand.
+    pub release_link: String,
     // When this service went out. Given by whoever records the release — the one moment in this file that
     // is a statement by the caller rather than a stamp put on by the server, because the server was not
     // there when it happened.
@@ -341,8 +346,8 @@ pub struct ServiceReleaseModel {
 /// what was deployed.
 ///
 /// There is no state machine. A release has happened by the time it is written down, and two things can
-/// become of it afterwards: it reaches production, which is a mark on it rather than a second release —
-/// see `released_on_prod_moment` — or it is deleted, for one recorded by mistake.
+/// become of it afterwards: it reaches another environment, which is a label on it rather than a second
+/// release — see `envs` — or it is deleted, for one recorded by mistake.
 #[derive(Debug, Clone)]
 pub struct ReleaseModel {
     pub project_id: String,
@@ -360,17 +365,19 @@ pub struct ReleaseModel {
     pub date: DateTimeAsMicroseconds,
     // In the order they were added, which is normally the order they went out.
     pub services: Vec<ServiceReleaseModel>,
-    // When this release was marked as out on PRODUCTION, and `None` while it is not.
+    // The environments this release is out on, as labels — `Dev`, `Prod` — in the order it reached them.
     //
-    // A release is written down when it ships SOMEWHERE — usually a test stand first — and reaching
-    // production is a later fact about the same versions of the same services. So it is a mark on the
-    // release rather than a second release, and it is what "what is actually on prod" is filtered by.
+    // A release is written down when it ships SOMEWHERE — usually a test stand first — and reaching the
+    // next environment is a later fact about the same versions of the same services. So it is a label on
+    // the release rather than a second release, and it is what "what is actually on prod" is filtered by.
     //
-    // A moment and not a bool, the way `close_moment` and `deleted_moment` are: "is it on prod" and
-    // "since when" are one fact, and two fields for it could disagree. Stamped when the mark is put on,
-    // kept if it is put on again, and cleared whole when it is taken off — a release pulled back from
-    // production must not go on reading as there.
-    pub released_on_prod_moment: Option<DateTimeAsMicroseconds>,
+    // Labels and not a flag per environment, because which environments there are is the project's own
+    // business: one has Dev and Prod, another a stand per client. Nothing here knows the list; a label
+    // exists for as long as some release carries it. Each is one word, kept as it was first spelled on
+    // the project, and no release carries the same one twice however it is cased — see
+    // `EnvsPatch::apply`. Taking a label off is how a release pulled back from an environment stops
+    // reading as there.
+    pub envs: Vec<String>,
     // What was said about the release: how the rollout went, what was noticed afterwards, why it was
     // pulled back. The same shape as a goal's thread and a task's, and it rides on the row for the same
     // reason — one atomic write per comment. The notes above say what CHANGED; this says what HAPPENED.
@@ -388,11 +395,30 @@ impl ReleaseModel {
         self.deleted_moment.is_some()
     }
 
-    /// Whether it has gone out to production. Derived, so it cannot disagree with the moment.
-    pub fn is_released_on_prod(&self) -> bool {
-        self.released_on_prod_moment.is_some()
+    /// Whether it is out on an environment, by that environment's label — in any case.
+    pub fn is_on_env(&self, env: &str) -> bool {
+        self.envs
+            .iter()
+            .any(|itm| task_manager_shared::releases::same_env(itm, env))
+    }
+
+    /// What a release marked "on production" by 0.2.0 reads as now: the label `Prod`.
+    ///
+    /// That build kept one fact about where a release was out — a moment in `released_on_prod_moment` —
+    /// and environments replaced it before much had been recorded. The two places old data can still
+    /// arrive from, a row nobody has rewritten since and an archive exported back then, both come through
+    /// here, so a release that was live does not turn up as out nowhere.
+    pub fn envs_of_prod_mark(on_prod: bool) -> Vec<String> {
+        if on_prod {
+            vec![LEGACY_PROD_ENV.to_string()]
+        } else {
+            Vec::new()
+        }
     }
 }
+
+/// The label a 0.2.0 production mark becomes — see [`ReleaseModel::envs_of_prod_mark`].
+const LEGACY_PROD_ENV: &str = "Prod";
 
 /// One checklist item, in memory. Carried identically by a task and by a goal.
 ///

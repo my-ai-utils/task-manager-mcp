@@ -162,11 +162,12 @@ fn render_releases(goal: &GoalResponse) -> Element {
                             div { class: "release-title", "{release.title}" }
                         }
                         div { class: "release-meta",
-                            super::ReleaseProdFlag { release: release.clone() }
+                            super::ReleaseEnvs { release: release.clone() }
                             super::ReleaseSettingsFlag { release: release.clone() }
                             span { class: "release-date",
                                 "{moment_for_display(release.date_unix_seconds)}"
                             }
+                            super::ReleaseOpenLink { release: release.clone() }
                         }
                     }
                     div { class: "release-body",

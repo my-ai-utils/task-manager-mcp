@@ -139,8 +139,8 @@ fn release(project_id: &str, number: i64, day: i64) -> ReleaseModel {
         release_notes: String::new(),
         date: DateTimeAsMicroseconds::new(day * 24 * 60 * 60 * 1_000_000),
         services: Vec::new(),
-        // Not on production and nothing said about it: neither is something the board derives from.
-        released_on_prod_moment: None,
+        // Out nowhere in particular and nothing said about it. The test about environments puts labels on.
+        envs: Vec::new(),
         comments: Vec::new(),
         created: DateTimeAsMicroseconds::new(0),
         updated: DateTimeAsMicroseconds::new(0),
@@ -712,6 +712,39 @@ fn releases_come_back_newest_first_by_their_date() {
         .collect();
 
     assert_eq!(numbers, vec![4, 2, 1, 3]);
+}
+
+/// The environments of a project are read off its releases: each label once however it is cased, in an
+/// order that does not depend on which release was recorded first, and without the ones only a deleted
+/// release carries — an environment exists for as long as something live is on it.
+#[test]
+fn a_projects_environments_are_what_its_live_releases_name() {
+    let board = board();
+    board.upsert_project(project("p", "RMS", &[]));
+    board.upsert_project(project("other", "TM", &[]));
+
+    let labelled = |project_id: &str, number: i64, day: i64, envs: &[&str]| {
+        let mut release = release(project_id, number, day);
+        release.envs = envs.iter().map(|itm| itm.to_string()).collect();
+        release
+    };
+
+    board.upsert_release(labelled("p", 1, 10, &["Dev", "Prod"]));
+    // An older spelling of the same environment, brought in by an import: the newest release's wins.
+    board.upsert_release(labelled("p", 2, 5, &["prod", "Test"]));
+    board.upsert_release(labelled("p", 3, 20, &[]));
+
+    let mut deleted = labelled("p", 4, 30, &["Sandbox"]);
+    deleted.deleted_moment = Some(DateTimeAsMicroseconds::new(1));
+    board.upsert_release(deleted);
+
+    board.upsert_release(labelled("other", 5, 10, &["Staging"]));
+
+    let read = board.read();
+
+    assert_eq!(read.envs_of_project("p"), vec!["Dev", "Prod", "Test"]);
+    assert_eq!(read.envs_of_project("other"), vec!["Staging"]);
+    assert!(read.envs_of_project("no-such-project").is_empty());
 }
 
 /// A deleted release leaves every list, and the goal that lists it is NOT edited: the number stays where

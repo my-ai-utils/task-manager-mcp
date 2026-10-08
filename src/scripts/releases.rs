@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use rust_extensions::date_time::DateTimeAsMicroseconds;
 use service_sdk::my_telemetry::MyTelemetryContext;
 
@@ -20,15 +22,26 @@ pub const MAX_RELEASE_TITLE_LEN: usize = 200;
 pub const MAX_MICROSERVICE_ID_LEN: usize = 120;
 pub const MAX_VERSION_LEN: usize = 60;
 
+/// The longest an environment's label may be. A label is a word on a chip — `Dev`, `Prod`, `Pre-Prod-EU` —
+/// and anything that needs more than this is a sentence in the wrong field.
+pub const MAX_ENV_LEN: usize = 40;
+
+/// The longest a service's release link may be. Far above any real url of a release or a workflow run,
+/// and there so that a page of text pasted into the field is refused rather than stored.
+pub const MAX_RELEASE_LINK_LEN: usize = 500;
+
 /// One microservice of a release, as a caller hands it over.
 ///
-/// `microservice_id`, `version` and `git_hash` are what the entry IS and are always given. The other three
+/// `microservice_id`, `version` and `git_hash` are what the entry IS and are always given. The other four
 /// are optional, and on a service the release already names an omitted one **keeps what is there** — see
 /// [`ServicesPatch::apply`].
 pub struct NewServiceRelease {
     pub microservice_id: String,
     pub version: String,
     pub git_hash: String,
+    /// Where the build of this version can be looked at — the GitHub release, or the workflow run that
+    /// built the image. An empty string is no link, and is how one is taken off.
+    pub release_link: Option<String>,
     /// When this service went out, as the caller writes it — see `parse_caller_moment`. `None` is now.
     pub datetime: Option<String>,
     pub settings_update_note: Option<String>,
@@ -56,7 +69,7 @@ impl ServicesPatch {
     ///
     /// **Adding a service the release already names is a correction, not a duplicate.** A release names a
     /// microservice once, so the entry is found by its id and rewritten in place: the version and the
-    /// commit are replaced, since stating them is what the call is for, and each of the three optional
+    /// commit are replaced, since stating them is what the call is for, and each of the four optional
     /// fields is replaced only when it was passed. That last part matters — correcting a mistyped version
     /// must not wipe a settings note somebody wrote, and an empty string is how a note is cleared on
     /// purpose.
@@ -75,6 +88,11 @@ impl ServicesPatch {
             let microservice_id = validate_microservice_id(&new_service.microservice_id)?;
             let version = validate_version(&new_service.version, &microservice_id)?;
             let git_hash = validate_git_hash(&new_service.git_hash, &microservice_id)?;
+
+            let release_link = match new_service.release_link.as_deref() {
+                Some(release_link) => Some(validate_release_link(release_link, &microservice_id)?),
+                None => None,
+            };
 
             let datetime = match new_service.datetime.as_deref() {
                 Some(datetime) => Some(super::parse_caller_moment(
@@ -102,6 +120,10 @@ impl ServicesPatch {
                     existing.version = version;
                     existing.git_hash = git_hash;
 
+                    if let Some(release_link) = release_link {
+                        existing.release_link = release_link;
+                    }
+
                     if let Some(datetime) = datetime {
                         existing.datetime = datetime;
                     }
@@ -118,6 +140,7 @@ impl ServicesPatch {
                     microservice_id,
                     version,
                     git_hash,
+                    release_link: release_link.unwrap_or_default(),
                     datetime: datetime.unwrap_or_else(|| to_the_second(now)),
                     settings_update_note: settings_update_note.unwrap_or_default(),
                     description: description.unwrap_or_default(),
@@ -230,6 +253,130 @@ fn validate_git_hash(src: &str, microservice_id: &str) -> Result<String, String>
     Ok(hash)
 }
 
+/// The link to store, or a refusal. Empty is an answer — no link — and is how one is taken off.
+///
+/// **Not checked against `github.com`**, for the reason a task's build link is not: an enterprise install
+/// and another CI answer on their own domains, and refusing a real build because of its host would be
+/// refusing it for a cosmetic reason. What IS checked is that this is a link — a version or a run number
+/// stored here would draw an anchor nobody can follow — and that it is one word: a url has no whitespace
+/// in it, and a sentence pasted into the wrong field does.
+fn validate_release_link(src: &str, microservice_id: &str) -> Result<String, String> {
+    let link = src.trim();
+
+    if link.is_empty() {
+        return Ok(String::new());
+    }
+
+    let rest = link
+        .strip_prefix("https://")
+        .or_else(|| link.strip_prefix("http://"));
+
+    let is_link =
+        rest.is_some_and(|rest| !rest.is_empty()) && !link.chars().any(char::is_whitespace);
+
+    if !is_link {
+        return Err(format!(
+            "'{link}' is not a link — the `release_link` of {microservice_id} is the url of the release or the workflow run that built it, like https://github.com/<owner>/<repo>/releases/tag/1.2.3. What happened during the build belongs in `description`"
+        ));
+    }
+
+    let length = link.chars().count();
+
+    if length > MAX_RELEASE_LINK_LEN {
+        return Err(format!(
+            "the release link of {microservice_id} is {length} characters — the limit is {MAX_RELEASE_LINK_LEN}"
+        ));
+    }
+
+    Ok(link.to_string())
+}
+
+/// The label to store, or a refusal.
+///
+/// One word, for the reason a microservice id is: the label is an identity. It is what a list of releases
+/// is filtered by and what a later removal finds, and `Pre Prod` typed once and `Pre-Prod` the next time
+/// would be two environments for one stand.
+fn validate_env(src: &str) -> Result<String, String> {
+    let env = src.trim();
+
+    if env.is_empty() {
+        return Err("an environment needs a label — one word, like Dev or Prod".to_string());
+    }
+
+    if env.chars().any(char::is_whitespace) {
+        return Err(format!(
+            "'{env}' is not an environment label — a label is one word, like Dev, Prod or Pre-Prod. What happened on that environment belongs on the release's thread"
+        ));
+    }
+
+    let length = env.chars().count();
+
+    if length > MAX_ENV_LEN {
+        return Err(format!(
+            "that environment label is {length} characters — the limit is {MAX_ENV_LEN}"
+        ));
+    }
+
+    Ok(env.to_string())
+}
+
+/// What a caller wants to change about where a release is out.
+///
+/// Add and remove rather than "here is the new list", like every list on this board: a release reaches
+/// its environments one at a time, and whoever rolls it out to production should not have to restate — or
+/// even know — that it is on a test stand too.
+#[derive(Default)]
+pub struct EnvsPatch {
+    pub add: Vec<String>,
+    pub remove: Vec<String>,
+}
+
+impl EnvsPatch {
+    pub fn is_empty(&self) -> bool {
+        self.add.is_empty() && self.remove.is_empty()
+    }
+
+    /// Apply the patch to one release's labels, or refuse it entirely.
+    ///
+    /// **A label is one environment however it is cased.** Adding one the release already carries changes
+    /// nothing — neither its place in the list, which is the order the release reached its environments
+    /// in, nor its spelling. A label new to this release is appended.
+    ///
+    /// **One spelling per project.** `known` is every label the project's releases already carry, and a
+    /// label that matches one of them is stored in THAT spelling, not the caller's: a project whose
+    /// releases said `Prod` and then `prod` and then `PROD` would draw three chips for one environment,
+    /// and that is exactly the drift a free-text field invites when different agents write to it. Only a
+    /// label the project has never used is taken as written.
+    ///
+    /// Removal after addition, so a label passed to both ends up removed. A label the release does not
+    /// carry is NOT an error: the caller's intent is already true.
+    pub fn apply(&self, envs: &mut Vec<String>, known: &[String]) -> Result<(), String> {
+        use task_manager_shared::releases::same_env;
+
+        for env in &self.add {
+            let env = validate_env(env)?;
+
+            if envs.iter().any(|itm| same_env(itm, &env)) {
+                continue;
+            }
+
+            let spelled = known
+                .iter()
+                .find(|itm| same_env(itm, &env))
+                .cloned()
+                .unwrap_or(env);
+
+            envs.push(spelled);
+        }
+
+        for env in &self.remove {
+            envs.retain(|itm| !same_env(itm, env));
+        }
+
+        Ok(())
+    }
+}
+
 fn validate_title(src: &str) -> Result<String, String> {
     let title = src.trim();
 
@@ -261,9 +408,10 @@ pub struct NewRelease {
     /// The goal this release ships, by handle or bare number — attached in the same call, so recording a
     /// release and saying what it was for cannot be done as two steps of which the second is forgotten.
     pub goal: Option<String>,
-    /// Whether it is out on production already. Almost always `false` when a release is first written
-    /// down — it goes to a test stand first, and the mark is put on later with `ReleasePatch`.
-    pub released_on_prod: bool,
+    /// The environments it is out on as it is recorded — usually the one stand it has just been rolled to.
+    /// Empty is a release written down before it has gone anywhere, or by somebody who does not know; the
+    /// rest are added with `ReleasePatch` as it reaches them.
+    pub envs: Vec<String>,
 }
 
 /// A change to a release. Every field is optional; `None` means "leave it alone".
@@ -274,14 +422,13 @@ pub struct ReleasePatch {
     pub release_notes: Option<String>,
     pub date: Option<String>,
     pub services: ServicesPatch,
-    /// `Some(true)` marks the release as out on production, `Some(false)` takes the mark off, `None`
-    /// leaves it alone — see [`mark_on_prod`].
-    pub released_on_prod: Option<bool>,
+    /// The environments to put the release on and to take it off — see [`EnvsPatch::apply`].
+    pub envs: EnvsPatch,
     /// `Some(false)` brings a deleted release back. `Some(true)` deletes it, which `delete_release` also
     /// does — both are here for the reason they are both on a goal's patch.
     pub deleted: Option<bool>,
     /// A note for the release's thread as part of this same change — how the rollout went, usually, in
-    /// the call that marks it as on production.
+    /// the call that adds the environment it has just reached.
     pub comment: Option<String>,
     pub comment_by: Option<String>,
 }
@@ -295,7 +442,7 @@ impl ReleasePatch {
             && self.release_notes.is_none()
             && self.date.is_none()
             && self.services.is_empty()
-            && self.released_on_prod.is_none()
+            && self.envs.is_empty()
             && self.deleted.is_none()
             && self.trimmed_comment().is_none()
     }
@@ -306,27 +453,6 @@ impl ReleasePatch {
             .as_deref()
             .map(str::trim)
             .filter(|itm| !itm.is_empty())
-    }
-}
-
-/// The production mark after a change to it.
-///
-/// **Stamped once and cleared whole**, the way a deletion is. Marking a release that is already on
-/// production must not move the moment — that is when it got there, and a second call saying the same
-/// thing is not a second rollout. Taking the mark off leaves nothing behind, so a release pulled back from
-/// production stops answering to "what is on prod" at once, and putting it back later is dated by when it
-/// went back.
-///
-/// Its own function because it is the whole of the rule and has no need of an `AppContext` to be tested.
-fn mark_on_prod(
-    current: Option<DateTimeAsMicroseconds>,
-    wanted: Option<bool>,
-    now: DateTimeAsMicroseconds,
-) -> Option<DateTimeAsMicroseconds> {
-    match wanted {
-        Some(true) => current.or(Some(now)),
-        Some(false) => None,
-        None => current,
     }
 }
 
@@ -387,6 +513,33 @@ fn read_release_reference(project: &ProjectModel, reference: &str) -> Result<i64
             Ok(parsed.number)
         }
     }
+}
+
+/// The release an address names within one project — the two halves of `release/{project}/{release}`.
+///
+/// The reference is the release's id, `RMS-R12`, or its bare number: the leniency every reference to a
+/// release gets, so the address works whichever of the two somebody typed. A handle of ANOTHER project is
+/// refused rather than followed — the address names its board, and one that said `TM` and opened a
+/// release of `RMS` would be two answers to "which board is this".
+///
+/// **A deleted release is found**, for the reason a handle resolves to one everywhere else: a link
+/// somebody kept has to say "this was deleted", and "no such release" would read like a typo.
+pub fn find_release_of_project(
+    board: &BoardInner,
+    project: &ProjectModel,
+    reference: &str,
+) -> Result<Arc<ReleaseModel>, String> {
+    let number = read_release_reference(project, reference)?;
+
+    board
+        .get_release_including_deleted(&project.id, number)
+        .ok_or_else(|| {
+            format!(
+                "no release {} on {}",
+                compose_release_handle(&project.prefix, number),
+                project.prefix
+            )
+        })
 }
 
 /// What a caller wants to change about the releases a goal lists.
@@ -478,6 +631,15 @@ pub async fn create_release(app: &AppContext, new_release: NewRelease) -> Result
     }
     .apply(&mut services, now)?;
 
+    // Spelled after the labels the project already uses, like every label added later.
+    let mut envs = Vec::new();
+
+    EnvsPatch {
+        add: new_release.envs,
+        remove: Vec::new(),
+    }
+    .apply(&mut envs, &board.envs_of_project(&project.id))?;
+
     // Open or closed, either is fine: a feature is very often released as its goal is being closed, in
     // whichever order the two calls happen to be made. Only a goal that is not there is refused.
     let goal_number = match new_release
@@ -505,7 +667,7 @@ pub async fn create_release(app: &AppContext, new_release: NewRelease) -> Result
         release_notes: new_release.release_notes.trim().to_string(),
         date,
         services,
-        released_on_prod_moment: mark_on_prod(None, Some(new_release.released_on_prod), now),
+        envs,
         comments: Vec::new(),
         created: now,
         updated: now,
@@ -561,7 +723,8 @@ async fn attach_to_goal(
     app.board.upsert_goal(goal);
 }
 
-/// Change a release: its texts, its date, the services in it, or whether it is deleted. Returns its handle.
+/// Change a release: its texts, its date, the services in it, the environments it is out on, or whether it
+/// is deleted. Returns its handle.
 pub async fn update_release(
     app: &AppContext,
     handle: &str,
@@ -569,7 +732,7 @@ pub async fn update_release(
 ) -> Result<String, String> {
     if patch.is_empty() {
         return Err(
-            "nothing to update: pass at least one of title, description, release_notes, date, a service to add or remove, released_on_prod, deleted or comment"
+            "nothing to update: pass at least one of title, description, release_notes, date, a service to add or remove, an environment to add or remove, deleted or comment"
                 .to_string(),
         );
     }
@@ -601,16 +764,17 @@ pub async fn update_release(
     // call rather than half of it.
     patch.services.apply(&mut release.services, now)?;
 
+    patch
+        .envs
+        .apply(&mut release.envs, &board.envs_of_project(&project.id))?;
+
     // Built before anything is written back, so a note with no author refuses the whole call — including
-    // the mark it came with.
+    // the environment it came with.
     let comment = build_release_comment(patch.trimmed_comment(), patch.comment_by.as_deref())?;
 
     if let Some(comment) = comment {
         release.comments.push(comment);
     }
-
-    release.released_on_prod_moment =
-        mark_on_prod(release.released_on_prod_moment, patch.released_on_prod, now);
 
     // Stamped once and cleared whole, exactly as on a task and a goal.
     match patch.deleted {
@@ -726,6 +890,7 @@ mod tests {
             microservice_id: microservice_id.to_string(),
             version: version.to_string(),
             git_hash: HASH.to_string(),
+            release_link: None,
             datetime: None,
             settings_update_note: None,
             description: None,
@@ -751,6 +916,7 @@ mod tests {
         assert_eq!(services[0].microservice_id, "my-service");
         assert_eq!(services[0].version, "1.2.3");
         assert_eq!(services[0].git_hash, HASH);
+        assert_eq!(services[0].release_link, "", "a service nobody linked has no link");
         assert_eq!(services[0].datetime, now(100));
         assert_eq!(services[0].settings_update_note, "");
         assert_eq!(services[0].description, "");
@@ -801,6 +967,7 @@ mod tests {
         let mut services = Vec::new();
 
         let mut first = service("my-service", "1.2.3");
+        first.release_link = Some("https://github.com/o/r/releases/tag/1.2.3".to_string());
         first.settings_update_note = Some("add `ttl` to settings".to_string());
         first.description = Some("the first cut".to_string());
 
@@ -826,6 +993,60 @@ mod tests {
             "a note nobody restated must survive the correction"
         );
         assert_eq!(services[0].description, "the first cut");
+        assert_eq!(
+            services[0].release_link, "https://github.com/o/r/releases/tag/1.2.3",
+            "and so must the link to the build"
+        );
+    }
+
+    /// The link is where the build can be looked at, so it has to be something that can be followed — and
+    /// like the two notes it is replaced only when it is passed, with an empty string taking it off.
+    #[test]
+    fn a_release_link_is_a_link_and_is_cleared_by_an_empty_one() {
+        for refused in [
+            "1.2.3",
+            "github.com/o/r/releases/tag/1.2.3",
+            "https://",
+            "ftp://example.com/build",
+            "javascript:alert(1)",
+            "https://github.com/o/r/actions/runs/1 it went fine",
+        ] {
+            let mut entry = service("my-service", "1.2.3");
+            entry.release_link = Some(refused.to_string());
+
+            assert!(
+                add(vec![entry]).apply(&mut Vec::new(), now(1)).is_err(),
+                "{refused:?} should be refused"
+            );
+        }
+
+        let too_long = format!("https://example.com/{}", "x".repeat(MAX_RELEASE_LINK_LEN));
+        let mut entry = service("my-service", "1.2.3");
+        entry.release_link = Some(too_long);
+        assert!(add(vec![entry]).apply(&mut Vec::new(), now(1)).is_err());
+
+        let mut services = Vec::new();
+
+        // Not held to github.com: another CI and an enterprise install are builds too.
+        for accepted in [
+            "https://github.com/my-ai-utils/task-manager-mcp/releases/tag/0.2.0",
+            "  https://github.com/o/r/actions/runs/123456789  ",
+            "http://ci.internal/job/my-service/45",
+        ] {
+            let mut entry = service("my-service", "1.2.3");
+            entry.release_link = Some(accepted.to_string());
+
+            add(vec![entry]).apply(&mut services, now(1)).unwrap();
+
+            assert_eq!(services[0].release_link, accepted.trim());
+        }
+
+        let mut cleared = service("my-service", "1.2.3");
+        cleared.release_link = Some("  ".to_string());
+
+        add(vec![cleared]).apply(&mut services, now(2)).unwrap();
+
+        assert_eq!(services[0].release_link, "");
     }
 
     /// An empty string is something a caller passed, so it replaces — that is how a note is cleared.
@@ -920,27 +1141,72 @@ mod tests {
         assert_eq!(validate_title("  Releases  ").unwrap(), "Releases");
     }
 
-    /// The moment is when the release GOT to production. Saying so twice is not a second rollout, and
-    /// taking the mark off has to leave nothing behind — a release pulled back must stop answering to
-    /// "what is on prod", and one put back is dated by when it went back.
+    fn envs(add: &[&str], remove: &[&str]) -> EnvsPatch {
+        EnvsPatch {
+            add: add.iter().map(|itm| itm.to_string()).collect(),
+            remove: remove.iter().map(|itm| itm.to_string()).collect(),
+        }
+    }
+
+    /// A release collects its environments in the order it reached them, and each one once: saying it is
+    /// on `Dev` a second time — in any case — is not a second environment and does not move the first.
     #[test]
-    fn the_prod_mark_is_stamped_once_and_cleared_whole() {
-        assert_eq!(mark_on_prod(None, None, now(100)), None);
-        assert_eq!(mark_on_prod(None, Some(false), now(100)), None);
+    fn a_release_collects_its_environments_in_order_and_each_once() {
+        let mut out = Vec::new();
 
-        let marked = mark_on_prod(None, Some(true), now(100));
-        assert_eq!(marked, Some(now(100)));
+        envs(&["Dev"], &[]).apply(&mut out, &[]).unwrap();
+        envs(&["Prod", "dev", " DEV "], &[]).apply(&mut out, &[]).unwrap();
 
-        assert_eq!(
-            mark_on_prod(marked, Some(true), now(500)),
-            Some(now(100)),
-            "marking it again must not move when it got there"
-        );
-        assert_eq!(mark_on_prod(marked, None, now(500)), Some(now(100)));
+        assert_eq!(out, vec!["Dev", "Prod"]);
+    }
 
-        let pulled_back = mark_on_prod(marked, Some(false), now(600));
-        assert_eq!(pulled_back, None);
-        assert_eq!(mark_on_prod(pulled_back, Some(true), now(700)), Some(now(700)));
+    /// One spelling per project. Three agents writing `Prod`, `prod` and `PROD` must come out as one chip
+    /// and one row of the filter, so a label the project already uses is stored the way the project spells
+    /// it — and only a label it has never used is taken as written.
+    #[test]
+    fn an_environment_is_spelled_the_way_the_project_already_spells_it() {
+        let known = vec!["Dev".to_string(), "Prod".to_string()];
+        let mut out = Vec::new();
+
+        envs(&["PROD", "dev", "Pre-Prod"], &[])
+            .apply(&mut out, &known)
+            .unwrap();
+
+        assert_eq!(out, vec!["Prod", "Dev", "Pre-Prod"]);
+    }
+
+    /// Taking a label off is how a release pulled back from an environment stops reading as there. It
+    /// finds the label in any case, runs after the additions, and is not an error for a label that was
+    /// never on.
+    #[test]
+    fn an_environment_is_taken_off_in_any_case_and_after_the_additions() {
+        let mut out = vec!["Dev".to_string(), "Prod".to_string()];
+
+        envs(&["Stage"], &["PROD", "stage", "never-was-here", "  "])
+            .apply(&mut out, &[])
+            .unwrap();
+
+        assert_eq!(out, vec!["Dev"]);
+    }
+
+    /// A label is an identity — what a list is filtered by and what a removal finds — so it is one word,
+    /// and a refused one leaves the caller holding an error rather than a release with a sentence on it.
+    #[test]
+    fn an_environment_label_is_one_short_word() {
+        for refused in ["", "   ", "Pre Prod", "prod\nrolled out at noon", &"x".repeat(MAX_ENV_LEN + 1)] {
+            assert!(
+                envs(&[refused], &[]).apply(&mut Vec::new(), &[]).is_err(),
+                "{refused:?} should be refused"
+            );
+        }
+
+        let mut out = Vec::new();
+
+        envs(&["  Pre-Prod-EU  ", "Прод"], &[])
+            .apply(&mut out, &[])
+            .unwrap();
+
+        assert_eq!(out, vec!["Pre-Prod-EU", "Прод"], "trimmed, and not held to ASCII");
     }
 
     /// Text without an author is refused, as on a goal: a thread about a rollout is read to find out who
@@ -977,9 +1243,13 @@ mod tests {
                 deleted: Some(false),
                 ..Default::default()
             },
-            // Taking the mark OFF is a change too: `Some(false)` must not be read as "nothing passed".
+            // Taking a label OFF is a change too, with nothing being added beside it.
             ReleasePatch {
-                released_on_prod: Some(false),
+                envs: envs(&[], &["Prod"]),
+                ..Default::default()
+            },
+            ReleasePatch {
+                envs: envs(&["Dev"], &[]),
                 ..Default::default()
             },
             ReleasePatch {
@@ -1031,7 +1301,7 @@ mod tests {
             release_notes: String::new(),
             date: now(number),
             services: Vec::new(),
-            released_on_prod_moment: None,
+            envs: Vec::new(),
             comments: Vec::new(),
             created: now(0),
             updated: now(0),
@@ -1096,6 +1366,32 @@ mod tests {
             .unwrap_err();
 
         assert!(deleted.contains("deleted: false"), "{deleted}");
+    }
+
+    /// The address of a release's page hands its two halves over as they were typed, so both spellings of
+    /// the release have to land on it — and a deleted one too, or a link somebody kept would read as a
+    /// typo instead of saying what became of the release.
+    #[test]
+    fn a_release_is_found_on_its_board_by_id_or_by_number_deleted_or_not() {
+        let board = board_with(vec![release(5, false), release(6, true)]);
+        let project = project();
+
+        for reference in ["RMS-R5", "rms-r5", " 5 "] {
+            let found = find_release_of_project(&board, &project, reference).unwrap();
+            assert_eq!(found.number, 5, "{reference:?}");
+        }
+
+        let deleted = find_release_of_project(&board, &project, "RMS-R6").unwrap();
+        assert!(deleted.is_deleted());
+
+        // A number nothing answers to, a release of another board, and a task's or a goal's id where a
+        // release's belongs.
+        for refused in ["RMS-R7", "7", "OTHER-R5", "RMS-G5", "RMS-5", "", "five"] {
+            assert!(
+                find_release_of_project(&board, &project, refused).is_err(),
+                "{refused:?} should not be found"
+            );
+        }
     }
 
     /// Detaching is the one thing that must work on a release that has been deleted — that is usually why

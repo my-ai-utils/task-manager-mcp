@@ -5,6 +5,7 @@ pub mod home;
 pub mod login;
 pub mod logout;
 pub mod projects_setup;
+pub mod release;
 pub mod releases;
 pub mod settings;
 pub mod users;

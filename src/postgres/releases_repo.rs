@@ -20,13 +20,15 @@ pub const PK_NAME: &str = "releases_pk";
 // rather than reconciled against a half-applied change. Nothing is ever asked of these across releases
 // that the in-memory board does not answer.
 //
-// The two notes carry `#[serde(default)]` because they are prose that may be added to later: a row written
-// by a build that did not know a field must still load.
+// The two notes and the link carry `#[serde(default)]`: a row written by a build that did not know a field
+// must still load, and `release_link` is exactly that field for every service recorded before it existed.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ServiceReleaseJsonModel {
     pub microservice_id: String,
     pub version: String,
     pub git_hash: String,
+    #[serde(default)]
+    pub release_link: String,
     pub datetime_unix_seconds: i64,
     #[serde(default)]
     pub settings_update_note: String,
@@ -78,9 +80,19 @@ pub struct ReleaseDto {
     #[sql_type("jsonb")]
     #[json]
     pub comments: Vec<ReleaseCommentJsonModel>,
-    // When the release was marked as out on production; NULL while it is not. A moment rather than a
-    // flag for the reason `deleted_moment` is: "on prod" and "since when" are one fact, and two columns
-    // for it could disagree.
+    // The environments the release is out on, as labels — see `ReleaseModel::envs`.
+    //
+    // NULLABLE because the column arrives on a table that already has rows: 0.2.0 created `releases`
+    // without it. NULL is therefore a row no build with environments has written yet, which is the one
+    // case the column below is still read for; every write puts a real array in, an empty one included.
+    #[sql_type("jsonb")]
+    #[json]
+    pub envs: Option<Vec<String>>,
+    // LEGACY, read and never set. 0.2.0 kept "is it out on production" here, as a moment; `envs` replaced
+    // it. A row written back then has this and a NULL `envs`, and loads as the label `Prod` — see the
+    // mapper. Every write stores NULL here, so the column empties itself as rows are touched, and the
+    // field can simply be deleted once no row predates `envs`: the schema sync never drops a column, so
+    // nothing has to be migrated for that either.
     #[sql_type("timestamp")]
     pub released_on_prod_moment: Option<DateTimeAsMicroseconds>,
     #[sql_type("timestamp")]

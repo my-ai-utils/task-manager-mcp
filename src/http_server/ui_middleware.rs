@@ -117,6 +117,8 @@ mod tests {
             "/wasm/task-manager-ui_bg.wasm",
             "/goals",
             "/releases",
+            // One release's own page — the address somebody is handed, so it is always opened cold.
+            "/release/TM/TM-R12",
             "/documents",
             "/settings/column-templates",
             "/authorized",
@@ -265,8 +267,16 @@ mod tests {
         assert!(up, "the server did not start listening");
 
         // The page itself, and a route that exists only inside the wasm: both are `index.html`, or a
-        // reload of any screen but the first is a 404 — and Google's redirect to `/authorized` with it.
-        for path in ["/", "/index.html", "/releases", "/authorized?code=x&state=y", "/settings/kinds"] {
+        // reload of any screen but the first is a 404 — and Google's redirect to `/authorized` with it,
+        // and every link to a release that anybody was ever sent.
+        for path in [
+            "/",
+            "/index.html",
+            "/releases",
+            "/release/TM/TM-R12",
+            "/authorized?code=x&state=y",
+            "/settings/kinds",
+        ] {
             let (status, etag, body) = fetch(at(path), false).await;
 
             assert_eq!(status, 200, "GET {path}");

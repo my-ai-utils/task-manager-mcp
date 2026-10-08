@@ -1,14 +1,16 @@
 use dioxus::prelude::*;
 use dioxus_utils::RenderState;
+use task_manager_shared::goals::GoalResponse;
 use task_manager_shared::kind_color::KindColor;
 use task_manager_shared::projects::ProjectResponse;
-use task_manager_shared::releases::{ReleaseResponse, moment_for_display};
+use task_manager_shared::releases::{ReleaseGoalResponse, ReleaseResponse, moment_for_display};
 
+use crate::dialogs::DialogState;
 use crate::states::AppState;
 
 use super::{
-    ComponentState, NOT_ON_PROD, ON_PROD, SERVICES_ON_A_ROW, includes_service,
-    matches_prod_filter, microservices_of,
+    ComponentState, NOT_ON_ENV, ON_ENV, SERVICES_ON_A_ROW, envs_to_offer, filter_asks,
+    includes_service, matches_env_filter, microservices_of,
 };
 
 /// What has gone out, newest first.
@@ -75,15 +77,19 @@ pub fn RenderReleases() -> Element {
 
     let releases = get_releases(cs, &cs_ra);
 
-    // The filter offers what the loaded releases name, so the header is built after the read is asked for
-    // and with nothing to offer while it is still out.
-    let services = match &releases {
-        Ok(releases) => microservices_of(releases),
-        Err(_) => Vec::new(),
+    // The filters offer what the loaded releases name, so the header is built after the read is asked for
+    // and with nothing to offer while it is still out — nothing but the environment already being
+    // filtered by, which stays in its control whatever the board holds.
+    let (services, envs) = match &releases {
+        Ok(releases) => (
+            microservices_of(releases),
+            envs_to_offer(releases, cs_ra.env_filter.as_str()),
+        ),
+        Err(_) => (Vec::new(), envs_to_offer(&[], cs_ra.env_filter.as_str())),
     };
 
     let header = rsx! {
-        RenderHeader { projects: projects.to_vec(), services, cs }
+        RenderHeader { projects: projects.to_vec(), services, envs, cs }
     };
 
     let releases = match releases {
@@ -99,12 +105,12 @@ pub fn RenderReleases() -> Element {
     };
 
     let service_filter = cs_ra.service_filter.as_str();
-    let prod_filter = cs_ra.prod_filter.as_str();
+    let env_filter = cs_ra.env_filter.as_str();
 
     let shown: Vec<ReleaseResponse> = releases
         .iter()
         .filter(|release| includes_service(release, service_filter))
-        .filter(|release| matches_prod_filter(release, prod_filter))
+        .filter(|release| matches_env_filter(release, env_filter))
         .cloned()
         .collect();
 
@@ -245,12 +251,13 @@ fn render_error(message: &str) -> Element {
 fn RenderHeader(
     projects: Vec<ProjectResponse>,
     services: Vec<String>,
+    envs: Vec<String>,
     cs: Signal<ComponentState>,
 ) -> Element {
     let cs_ra = cs.read();
     let selected_prefix = cs_ra.selected.clone();
     let service_filter = cs_ra.service_filter.clone();
-    let prod_filter = cs_ra.prod_filter.clone();
+    let env_filter = cs_ra.env_filter.clone();
     drop(cs_ra);
 
     let mut cs = cs;
@@ -288,17 +295,29 @@ fn RenderHeader(
                         }
                     }
                 }
-                // What has actually reached production. A release is recorded when it ships anywhere,
-                // so the unfiltered list is everything that went out; this is what narrows it to what
-                // is live — and, with a service picked beside it, to the version of it users are on.
+                // Where a release has got to. One is recorded when it ships anywhere, so the unfiltered
+                // list is everything that went out; `On Prod` narrows it to what is live — and, with a
+                // service picked beside it, to the version of it users are on. Each environment is
+                // offered both ways round, because "what has not reached Prod yet" is the list somebody
+                // rolling out works from, and it is not the same as "what is on Dev".
                 select {
-                    onchange: move |event| cs.write().set_prod_filter(event.value()),
-                    option { value: "", selected: prod_filter.is_empty(), "Any stage" }
-                    option { value: ON_PROD, selected: prod_filter == ON_PROD, "On prod" }
-                    option {
-                        value: NOT_ON_PROD,
-                        selected: prod_filter == NOT_ON_PROD,
-                        "Not on prod yet"
+                    onchange: move |event| cs.write().set_env_filter(event.value()),
+                    option { value: "", selected: env_filter.is_empty(), "Any environment" }
+                    for env in envs.iter() {
+                        option {
+                            key: "on-{env}",
+                            value: "{ON_ENV}{env}",
+                            selected: filter_asks(&env_filter, ON_ENV, env),
+                            "On {env}"
+                        }
+                    }
+                    for env in envs.iter() {
+                        option {
+                            key: "not-{env}",
+                            value: "{NOT_ON_ENV}{env}",
+                            selected: filter_asks(&env_filter, NOT_ON_ENV, env),
+                            "Not on {env} yet"
+                        }
                     }
                 }
             }
@@ -345,16 +364,15 @@ fn RenderRelease(release: ReleaseResponse, open: bool, cs: Signal<ComponentState
                     // tooltip and in the open release: on one line it was competing for room with the
                     // versions, and a release's own title usually says what the goal's would.
                     for goal in release.goals.iter() {
-                        span {
-                            class: "release-goal",
+                        RenderReleaseGoal {
                             key: "{goal.id}",
-                            style: "border-left-color: {KindColor::parse_or_default(&goal.color).hex()}",
-                            title: "{goal.id} · {goal.name}",
-                            span { class: "goal-id", "{goal.id}" }
+                            goal: goal.clone(),
+                            project: release.project.clone(),
+                            named: false,
                         }
                     }
 
-                    crate::dialogs::ReleaseProdFlag { release: release.clone() }
+                    crate::dialogs::ReleaseEnvs { release: release.clone() }
                     crate::dialogs::ReleaseSettingsFlag { release: release.clone() }
 
                     for service in release.services.iter().take(SERVICES_ON_A_ROW) {
@@ -381,6 +399,10 @@ fn RenderRelease(release: ReleaseResponse, open: bool, cs: Signal<ComponentState
                     }
 
                     span { class: "release-date", "{date}" }
+
+                    // Last, so it is in one place down the list: the way to this release's own page,
+                    // and so to an address that can be handed to somebody.
+                    crate::dialogs::ReleaseOpenLink { release: release.clone() }
                 }
             }
 
@@ -392,12 +414,11 @@ fn RenderRelease(release: ReleaseResponse, open: bool, cs: Signal<ComponentState
                     if !release.goals.is_empty() {
                         div { class: "release-goals",
                             for goal in release.goals.iter() {
-                                span {
-                                    class: "release-goal",
+                                RenderReleaseGoal {
                                     key: "{goal.id}",
-                                    style: "border-left-color: {KindColor::parse_or_default(&goal.color).hex()}",
-                                    span { class: "goal-id", "{goal.id}" }
-                                    span { "{goal.name}" }
+                                    goal: goal.clone(),
+                                    project: release.project.clone(),
+                                    named: true,
                                 }
                             }
                         }
@@ -408,4 +429,129 @@ fn RenderRelease(release: ReleaseResponse, open: bool, cs: Signal<ComponentState
             }
         }
     }
+}
+
+/// A goal a release shipped, as a chip edged in that goal's colour — and the way into the goal.
+///
+/// `named` is the one difference between the places it is drawn: the folded row has room for the id only
+/// and says the name in a tooltip, the open release and the release's own page spell it out.
+#[component]
+pub fn RenderReleaseGoal(goal: ReleaseGoalResponse, project: String, named: bool) -> Element {
+    let app_state = consume_context::<Signal<AppState>>();
+
+    let color = KindColor::parse_or_default(&goal.color).hex();
+    let tooltip = if named {
+        String::new()
+    } else {
+        format!("{} · {}", goal.id, goal.name)
+    };
+
+    let goal_id = goal.id.clone();
+
+    rsx! {
+        span {
+            class: "release-goal",
+            style: "border-left-color: {color}",
+            title: "{tooltip}",
+            span { class: "goal-id", "{goal.id}" }
+            if named {
+                span { "{goal.name}" }
+            }
+
+            // The eye a goal's own row ends with, opening the dialog that one opens. `stop_propagation`
+            // for the reason it is there too: on the folded row this chip sits inside the head, the head
+            // folds the release, and one click must do one thing.
+            button {
+                class: "sticker-view",
+                title: "Read this goal and its comments",
+                onclick: move |event| {
+                    event.stop_propagation();
+                    open_goal(app_state, project.clone(), goal_id.clone());
+                },
+                "👁"
+            }
+        }
+    }
+}
+
+/// Opens a goal a release names, in the dialog the eye on that goal's own row opens.
+///
+/// A release holds its goal by id, name and colour — enough for the chip, not for the dialog. The rest is
+/// the board, and it is usually already here: the push this screen is drawn from carries the goals and the
+/// tasks beside the releases, so the dialog opens with no request and from the same revision as the row
+/// that was clicked.
+///
+/// **Usually, and not always — a release is exactly the thing that outlives its goal.** A push carries the
+/// LIVE goals; one closed longer ago than the project's archive window is not among them, and that is the
+/// ordinary state of a goal whose release is a month old. So a goal the push does not hold is asked of the
+/// server, archive included — as is every goal when there is no push to look in, which is the first
+/// moment of a cold load and any tab whose socket has dropped.
+fn open_goal(app_state: Signal<AppState>, project: String, goal_id: String) {
+    let pushed = {
+        let app_ra = app_state.read();
+
+        app_ra
+            .board_push
+            .as_ref()
+            .filter(|snapshot| snapshot.project == project)
+            .and_then(|snapshot| {
+                crate::views::goals::find_goal_with_status(
+                    &snapshot.goals,
+                    &snapshot.tasks,
+                    &goal_id,
+                )
+            })
+    };
+
+    if let Some((goal, status)) = pushed {
+        crate::dialogs::open(view_goal(goal, status));
+        return;
+    }
+
+    spawn(async move {
+        let dialog = match read_goal(&project, &goal_id).await {
+            Ok(Some((goal, status))) => view_goal(goal, status),
+            // A release does not list a goal that has been deleted, so this is a goal deleted between
+            // the list being read and the eye being clicked. Said, rather than a click that does nothing.
+            Ok(None) => DialogState::Message {
+                title: goal_id,
+                text: "This goal is not on the board any more.".to_string(),
+            },
+            Err(message) => DialogState::Message {
+                title: goal_id,
+                text: message,
+            },
+        };
+
+        crate::dialogs::open(dialog);
+    });
+}
+
+fn view_goal(goal: GoalResponse, status: &str) -> DialogState {
+    DialogState::ViewGoal {
+        goal,
+        status: status.to_string(),
+    }
+}
+
+/// One goal by id, read from the server with the tasks its status is derived from.
+///
+/// Both lists whole, archive included: the goal is being asked for BECAUSE it may have left the live
+/// list, and its status is a statement about its tasks — the same ones the Goals screen reads, so the two
+/// cannot answer differently. Asked for together, since neither needs the other to be sent.
+async fn read_goal(
+    project: &str,
+    goal_id: &str,
+) -> Result<Option<(GoalResponse, &'static str)>, String> {
+    let (goals, tasks) = futures::join!(
+        crate::api::get_goals(project, true),
+        crate::api::get_tasks(project, true),
+    );
+
+    let goals = goals.map_err(|err| err.message)?.goals;
+    let tasks = tasks.map_err(|err| err.message)?.tasks;
+
+    Ok(crate::views::goals::find_goal_with_status(
+        &goals, &tasks, goal_id,
+    ))
 }

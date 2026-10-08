@@ -368,7 +368,8 @@ fn get_goals(
             spawn(async move {
                 cs.write().goals.set_loading();
 
-                match crate::api::get_goals(&project).await {
+                // `false`: the live list. A goal past its window is not drawn here — see `get_goals`.
+                match crate::api::get_goals(&project, false).await {
                     Ok(response) => cs.write().goals.set_loaded(response.goals),
                     Err(err) => cs.write().goals.set_error(err.message),
                 }
@@ -435,6 +436,33 @@ fn goal_status(goal: &GoalResponse, tasks: &[TaskResponse]) -> GoalStatus {
     } else {
         GoalStatus::Todo
     }
+}
+
+/// A goal and the status its row shows, found among a board's goals by the goal's id.
+///
+/// For a screen that names a goal without holding it: a release carries the id, the name and the colour of
+/// the goal it shipped and nothing else, while the dialog wants the whole goal and a status beside it. The
+/// status is worked out HERE — by [`goal_status`], over the tasks picked the way the list above groups
+/// them — rather than by whoever asks, because a dialog that said `Todo` where this screen says
+/// `In Progress` would be two answers to one question.
+///
+/// `None` when no goal on the list has that id. Whether that means "archived" or "gone" is the caller's to
+/// know: it is the one that chose which list to pass.
+pub fn find_goal_with_status(
+    goals: &[GoalResponse],
+    tasks: &[TaskResponse],
+    goal_id: &str,
+) -> Option<(GoalResponse, &'static str)> {
+    let goal = goals.iter().find(|itm| itm.id == goal_id)?;
+
+    // The two conditions the grouping in `RenderGoals` applies: under this goal, and not deleted.
+    let under: Vec<TaskResponse> = tasks
+        .iter()
+        .filter(|task| task.deleted_unix_seconds.is_none() && task.goal.as_deref() == Some(goal_id))
+        .cloned()
+        .collect();
+
+    Some((goal.clone(), goal_status(goal, &under).title()))
 }
 
 /// The three states [`goal_status`] can report, and how each is drawn.
@@ -908,5 +936,132 @@ fn RenderGoalTask(task: TaskResponse, project: ProjectResponse) -> Element {
 
             span { class: "goal-task-status", "{status_name}" }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn goal(id: &str) -> GoalResponse {
+        GoalResponse {
+            id: id.to_string(),
+            project: "RMS".to_string(),
+            name: id.to_string(),
+            description: String::new(),
+            color: String::new(),
+            priority: String::new(),
+            status: "todo".to_string(),
+            tasks_amount: 0,
+            done_amount: 0,
+            documents: Vec::new(),
+            subtasks: Vec::new(),
+            releases: Vec::new(),
+            comments: Vec::new(),
+            created_unix_seconds: 0,
+            updated_unix_seconds: 0,
+            closed_unix_seconds: None,
+            deleted_unix_seconds: None,
+        }
+    }
+
+    fn task(id: &str, goal: &str, status: &str) -> TaskResponse {
+        TaskResponse {
+            id: id.to_string(),
+            project: "RMS".to_string(),
+            text: id.to_string(),
+            status: status.to_string(),
+            priority: String::new(),
+            kind: None,
+            goal: Some(goal.to_string()),
+            goal_name: None,
+            goal_color: None,
+            assignee: None,
+            assignee_name: None,
+            labels: Vec::new(),
+            depends_on: Vec::new(),
+            blocks: Vec::new(),
+            link_statuses: Vec::new(),
+            blocked: false,
+            documents: Vec::new(),
+            subtasks: Vec::new(),
+            gh_actions: Vec::new(),
+            comments: Vec::new(),
+            created_unix_seconds: 0,
+            updated_unix_seconds: 0,
+            closed_unix_seconds: None,
+            deleted_unix_seconds: None,
+        }
+    }
+
+    /// The Releases screen opens a goal by its id and has to say about it what this screen's row says —
+    /// so the three answers are checked through the one function both go through.
+    #[test]
+    fn a_goal_found_by_id_carries_the_status_its_row_shows() {
+        let mut shipped = goal("RMS-G3");
+        shipped.closed_unix_seconds = Some(1_791_331_200);
+
+        let goals = [goal("RMS-G1"), goal("RMS-G2"), shipped];
+
+        let tasks = [
+            task("RMS-1", "RMS-G1", COLUMN_ID_TODO),
+            task("RMS-2", "RMS-G2", COLUMN_ID_TODO),
+            task("RMS-3", "RMS-G2", "in-progress"),
+        ];
+
+        let status_of = |id: &str| find_goal_with_status(&goals, &tasks, id).map(|(_, status)| status);
+
+        assert_eq!(status_of("RMS-G1"), Some("Todo"));
+        assert_eq!(
+            status_of("RMS-G2"),
+            Some("In Progress"),
+            "one task off the first column is a goal that has started"
+        );
+        assert_eq!(status_of("RMS-G3"), Some("Done"), "closed is done, whatever is under it");
+
+        let (found, _) = find_goal_with_status(&goals, &tasks, "RMS-G2").unwrap();
+        assert_eq!(found.id, "RMS-G2", "the goal that was asked for, whole");
+    }
+
+    /// Only this goal's own live work speaks for it: a neighbour's task that has started, and a task of
+    /// its own that was deleted after it started, are the two ways to be told `In Progress` wrongly.
+    #[test]
+    fn another_goals_work_and_deleted_work_do_not_start_a_goal() {
+        let goals = [goal("RMS-G1"), goal("RMS-G2")];
+
+        let mut deleted = task("RMS-2", "RMS-G1", "in-progress");
+        deleted.deleted_unix_seconds = Some(1_791_331_200);
+
+        let tasks = [
+            task("RMS-1", "RMS-G1", COLUMN_ID_TODO),
+            deleted,
+            task("RMS-3", "RMS-G2", "in-progress"),
+        ];
+
+        let (_, status) = find_goal_with_status(&goals, &tasks, "RMS-G1").unwrap();
+        assert_eq!(status, "Todo");
+    }
+
+    /// A goal whose finished work has aged off the board has no started task to point at — and has
+    /// started all the same, which is what the server's counter is consulted for.
+    #[test]
+    fn archived_done_work_still_means_the_goal_has_started() {
+        let mut half_way = goal("RMS-G1");
+        half_way.tasks_amount = 4;
+        half_way.done_amount = 2;
+
+        let (_, status) = find_goal_with_status(&[half_way], &[], "RMS-G1").unwrap();
+        assert_eq!(status, "In Progress");
+    }
+
+    /// The live list does not hold a goal closed past its window, and a release is exactly the thing that
+    /// outlives its goal — so "not here" has to be an answer the caller can act on, not a panic or a
+    /// stand-in goal.
+    #[test]
+    fn a_goal_that_is_not_on_the_list_is_not_found() {
+        let goals = [goal("RMS-G1")];
+
+        assert!(find_goal_with_status(&goals, &[], "RMS-G7").is_none());
+        assert!(find_goal_with_status(&[], &[], "RMS-G1").is_none());
     }
 }

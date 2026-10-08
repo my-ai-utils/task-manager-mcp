@@ -80,6 +80,8 @@ pub fn build_controllers(app: &Arc<AppContext>, http_server_builder: &mut HttpSe
     http_server_builder.register_post_action(goals::SetGoalColorAction::new(app.clone()));
     // A read, like the two lists around it. A release is recorded through /mcp.
     http_server_builder.register_post_action(releases::ListReleasesAction::new(app.clone()));
+    // One of them by id — what a release's own page, the thing a shared link opens, is drawn from.
+    http_server_builder.register_post_action(releases::GetReleaseAction::new(app.clone()));
     http_server_builder.register_post_action(tasks::ListTasksAction::new(app.clone()));
     http_server_builder.register_post_action(tasks::MoveTaskAction::new(app.clone()));
     http_server_builder.register_post_action(tasks::FindTaskAction::new(app.clone()));

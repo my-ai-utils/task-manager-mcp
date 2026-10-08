@@ -52,6 +52,14 @@ pub enum AppRoute {
     // is showing is remembered rather than linked.
     #[route("/releases")]
     Releases {},
+    // One release, on a page of its own — the address somebody is handed. Unlike the list above, WHICH
+    // release is the whole of the address: the board's prefix, then the release's id (`RMS-R12`) or its
+    // bare number. The prefix comes first and on its own although the id repeats it, so the link reads
+    // without knowing how an id is put together and access is decided on the half that names the board.
+    // The shape is also written where links are BUILT — `release_page_path` in the shared crate — and a
+    // test in the page's state holds the two together.
+    #[route("/release/:project/:release")]
+    ReleasePage { project: String, release: String },
     // The project's documents: the tree on the left, whatever is selected on the right. The selection is IN
     // the url so a document can be linked to — an agent can say "see TM/docs/design.md" as an address, and a
     // reload lands back on it. Modelled on the file browser in `remote-development-mcp`.
@@ -203,6 +211,16 @@ fn Releases() -> Element {
     rsx! {
         Shell { active: "releases",
             crate::views::releases::RenderReleases {}
+        }
+    }
+}
+
+/// Under the Releases tab: it is one of them, and the tab is the way back to the rest.
+#[component]
+fn ReleasePage(project: String, release: String) -> Element {
+    rsx! {
+        Shell { active: "releases",
+            crate::views::release::RenderReleasePage { project, release }
         }
     }
 }

@@ -474,12 +474,15 @@ pub(super) fn release_to_file(project: &ProjectModel, release: &ReleaseModel) ->
                 microservice_id: itm.microservice_id.clone(),
                 version: itm.version.clone(),
                 git_hash: itm.git_hash.clone(),
+                release_link: itm.release_link.clone(),
                 datetime: encode_moment(itm.datetime),
                 settings_update_note_base64: encode_text(&itm.settings_update_note),
                 description_base64: encode_text(&itm.description),
             })
             .collect(),
-        released_on_prod: release.released_on_prod_moment.map(encode_moment),
+        envs: release.envs.clone(),
+        // Never written: what it used to say travels as a label in `envs`.
+        released_on_prod: None,
         created: encode_moment(release.created),
         updated: encode_moment(release.updated),
         deleted: release.deleted_moment.map(encode_moment),

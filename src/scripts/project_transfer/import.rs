@@ -853,6 +853,7 @@ fn build_release(
             microservice_id: service.microservice_id.trim().to_string(),
             version: service.version.trim().to_string(),
             git_hash: service.git_hash.trim().to_lowercase(),
+            release_link: release_link_of_file(&service.release_link),
             // The moment somebody SAID this service went out, so the file's and never now — an import is
             // not a rollout.
             datetime: decode_moment(&service.datetime, "a service's datetime")?,
@@ -872,12 +873,7 @@ fn build_release(
         release_notes: decode_text(&src.release_notes_base64, "a release's notes")?,
         date: decode_moment(&src.date, "a release's date")?,
         services,
-        // The moment it reached production THERE, kept — an import is not a rollout, and a release that
-        // went live in March must not arrive saying it did so today.
-        released_on_prod_moment: decode_optional_moment(
-            src.released_on_prod.as_deref(),
-            "a release's released_on_prod",
-        )?,
+        envs: envs_of_file(src),
         // Its thread out of the same map the cards take theirs from: `comments.yaml` names what a comment
         // is on by handle, and a release's handle is as unambiguous as a task's.
         comments: comments.remove(&handle).unwrap_or_default(),
@@ -885,6 +881,61 @@ fn build_release(
         updated: decode_moment(&src.updated, "a release's updated")?,
         deleted_moment: decode_optional_moment(src.deleted.as_deref(), "a release's deleted")?,
     })
+}
+
+/// Where a release in the file is out.
+///
+/// The labels it carries, tidied the way `EnvsPatch` would have stored them — trimmed, blanks dropped, and
+/// each environment once however it is cased — which only ever changes a file somebody edited.
+///
+/// **They arrive spelled as the SOURCE board spelled them.** Nothing here looks at what the receiving
+/// project calls its environments: an import carries a board across, it does not merge two vocabularies,
+/// and a `prod` that became `Prod` on the way would be the importer editing the record.
+///
+/// An archive from 0.2.0 has no labels at all and may say `released_on_prod` instead. That was the only
+/// statement that build could make about where a release was out, so it is honoured — as the label the
+/// mark became everywhere else. Only whether it is THERE is read: the moment it carried has nowhere to go.
+fn envs_of_file(src: &ReleaseFileModel) -> Vec<String> {
+    if src.envs.is_empty() {
+        return ReleaseModel::envs_of_prod_mark(src.released_on_prod.is_some());
+    }
+
+    let mut envs: Vec<String> = Vec::with_capacity(src.envs.len());
+
+    for env in &src.envs {
+        let env = env.trim();
+
+        if env.is_empty()
+            || envs
+                .iter()
+                .any(|itm| task_manager_shared::releases::same_env(itm, env))
+        {
+            continue;
+        }
+
+        envs.push(env.to_string());
+    }
+
+    envs
+}
+
+/// A service's link as the board will hold it: what the file says when that is a link, and nothing when
+/// it is not.
+///
+/// The write path refuses a `release_link` that is not a url, because whatever is stored is drawn as an
+/// anchor. A file somebody edited is the one way around that check, so it is applied here too — and the
+/// service still arrives: a bad link is not a reason to lose the record of what was deployed.
+fn release_link_of_file(src: &str) -> String {
+    let link = src.trim();
+
+    let is_link = (link.starts_with("https://") || link.starts_with("http://"))
+        && !link.chars().any(char::is_whitespace);
+
+    if is_link {
+        link.to_string()
+    } else {
+        String::new()
+    }
 }
 
 fn build_task(
@@ -1914,6 +1965,11 @@ mod tests {
                     microservice_id: "task-manager-rest-api".to_string(),
                     version: "0.1.67".to_string(),
                     git_hash: "099602e4c1a9b7d2f3e5a6b8c9d0e1f2a3b4c5d6".to_string(),
+                    // Built by CI, so there is a build to point at. A url is what YAML has opinions about
+                    // — a colon and a `#` in a plain scalar — which is the reason to carry one here.
+                    release_link:
+                        "https://github.com/my-ai-utils/task-manager-mcp/actions/runs/1785#summary"
+                            .to_string(),
                     datetime: moment("2026-10-07T14:30:00.000000Z"),
                     settings_update_note: "add to settings:\n  releases:\n    enabled: true\n"
                         .to_string(),
@@ -1923,14 +1979,16 @@ mod tests {
                     microservice_id: "task-manager-ui".to_string(),
                     version: "1.10".to_string(),
                     git_hash: "1234567".to_string(),
+                    // And one built by hand: no link is a fact too, and it has to arrive as none.
+                    release_link: String::new(),
                     datetime: moment("2026-10-07T14:45:10.000000Z"),
                     settings_update_note: String::new(),
                     description: String::new(),
                 },
             ],
-            // On production two days after it first went out — a fourth moment unlike the others, so it
-            // cannot arrive as `date`, as `created` or as the day of the import and still pass.
-            released_on_prod_moment: Some(moment("2026-10-09T16:20:00.000000Z")),
+            // On a test stand and then on production, in that order — the order is part of the record, and
+            // neither label is spelled the way an importer would normalise it to.
+            envs: vec!["dev-2".to_string(), "Prod".to_string()],
             // Left empty here: a thread does not travel in `releases.yaml`. The tests that are about it
             // put one in `comments.yaml`, which is where the export writes it.
             comments: Vec::new(),
@@ -1959,7 +2017,8 @@ mod tests {
         assert_eq!(landed.date, left.date);
         // Every service, every field of each, and in the order they were added.
         assert_eq!(landed.services, left.services);
-        assert_eq!(landed.released_on_prod_moment, left.released_on_prod_moment);
+        // Where it is out, in the order it got there and spelled as the source board spelled it.
+        assert_eq!(landed.envs, left.envs);
         assert_eq!(landed.created, left.created);
         assert_eq!(landed.updated, left.updated);
         assert_eq!(landed.deleted_moment, left.deleted_moment);
@@ -2542,12 +2601,18 @@ mod tests {
         let landed = &releases[0];
 
         assert_arrived_as_it_left(landed, &shipped);
-        assert!(landed.is_released_on_prod());
+        assert!(landed.is_on_env("prod"));
         assert_eq!(
-            landed.released_on_prod_moment,
-            Some(moment("2026-10-09T16:20:00.000000Z")),
-            "when it reached production THERE"
+            landed.envs,
+            vec!["dev-2", "Prod"],
+            "the environments it was on THERE, in the order it reached them"
         );
+        assert_eq!(
+            landed.services[0].release_link,
+            "https://github.com/my-ai-utils/task-manager-mcp/actions/runs/1785#summary",
+            "the link to the build, whole"
+        );
+        assert_eq!(landed.services[1].release_link, "", "and no link where there was none");
 
         assert_eq!(landed.comments.len(), 2);
 
@@ -2561,19 +2626,23 @@ mod tests {
         assert!(threads.contains_key("TM-G7"), "the goal's is still there for the goal");
     }
 
-    /// A release that has not reached production says nothing about it in the file, and arrives the same
-    /// way — the absence is the statement.
+    /// A release that is out nowhere says nothing about it in the file, and arrives the same way — the
+    /// absence is the statement. Neither the list nor the field 0.2.0 wrote is spelled into the archive.
     #[test]
-    fn a_release_not_on_production_arrives_not_on_production() {
+    fn a_release_out_nowhere_arrives_out_nowhere() {
         let mut staged = a_release(12);
-        staged.released_on_prod_moment = None;
+        staged.envs.clear();
 
         let file = release_to_file(&a_source_project(), &staged);
+        let written = serde_yaml::to_string(&file).unwrap();
 
-        assert!(file.released_on_prod.is_none());
         assert!(
-            !serde_yaml::to_string(&file).unwrap().contains("released_on_prod"),
-            "an unset mark is left out of the file rather than written as null"
+            !written.contains("envs"),
+            "an empty list is left out of the file rather than written as []: {written}"
+        );
+        assert!(
+            !written.contains("released_on_prod"),
+            "the field environments replaced is never written: {written}"
         );
 
         let landed = build_release(
@@ -2584,8 +2653,72 @@ mod tests {
         )
         .expect("the release should build");
 
-        assert!(!landed.is_released_on_prod());
+        assert!(landed.envs.is_empty());
         assert!(landed.comments.is_empty());
+    }
+
+    /// An archive exported by 0.2.0 knows one thing about where a release is out: whether it had reached
+    /// production. It was live there, so it arrives as live — as the label that mark became — and one
+    /// that carries labels of its own is read from those alone.
+    #[test]
+    fn an_archive_from_before_environments_brings_its_production_mark_as_a_label() {
+        let mut staged = a_release(12);
+        staged.envs.clear();
+
+        let written = serde_yaml::to_string(&release_to_file(&a_source_project(), &staged)).unwrap();
+
+        let old: ReleaseFileModel = serde_yaml::from_str(&format!(
+            "{written}released_on_prod: \"2026-10-09T16:20:00.000000Z\"\n"
+        ))
+        .expect("an archive with the old field still reads");
+
+        let build = |file: &ReleaseFileModel| {
+            build_release(
+                &a_target_project(),
+                file,
+                &numbering(&[], &[], &[("TM-R12", 51)]),
+                &mut AHashMap::new(),
+            )
+            .expect("the release should build")
+        };
+
+        assert_eq!(build(&old).envs, vec!["Prod"]);
+
+        // Somebody added labels to that same file: they are what it says now.
+        let mut relabelled = old;
+        relabelled.envs = vec!["Dev".to_string()];
+
+        assert_eq!(build(&relabelled).envs, vec!["Dev"]);
+    }
+
+    /// A file somebody edited is the one way a label or a link reaches the board without passing the
+    /// checks the write path makes, so the same tidying is done on the way in: a label once however it
+    /// is cased, and a link only when it is one — with the service arriving either way.
+    #[test]
+    fn an_edited_file_is_tidied_the_way_a_write_would_have_been() {
+        let mut file = release_to_file(&a_source_project(), &a_release(12));
+
+        file.envs = vec![
+            "  Dev ".to_string(),
+            "dev".to_string(),
+            String::new(),
+            "Prod".to_string(),
+        ];
+        file.services[0].release_link = "javascript:alert(1)".to_string();
+        file.services[1].release_link = "  https://ci.example.com/job/45  ".to_string();
+
+        let landed = build_release(
+            &a_target_project(),
+            &file,
+            &numbering(&[], &[], &[("TM-R12", 51)]),
+            &mut AHashMap::new(),
+        )
+        .expect("the release should build");
+
+        assert_eq!(landed.envs, vec!["Dev", "Prod"]);
+        assert_eq!(landed.services.len(), 2, "a bad link does not cost the service");
+        assert_eq!(landed.services[0].release_link, "");
+        assert_eq!(landed.services[1].release_link, "https://ci.example.com/job/45");
     }
 
     /// A goal handle where a task is expected — and the other way round — is a file somebody has edited into

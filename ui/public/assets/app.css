@@ -2541,6 +2541,19 @@ button.task-view-check-row:hover {
   min-width: 0;
 }
 
+/* The eye on a release's goal: the way into the goal itself, and the same button a goal's own row ends
+   with. Two things differ here. It sits IN the chip rather than at the far edge of a row, so the `auto`
+   margin that pushes it there is taken back. And it comes up to full strength while the pointer is anywhere
+   on the chip, not only on the glyph — a 13px target that has to be found before it shows is a target
+   that is not there. */
+.release-goal .sticker-view {
+  margin-left: 0;
+}
+
+.release-goal:hover .sticker-view {
+  opacity: 1;
+}
+
 /* The goals of an open release, named in full: the folded row has room for the id only. */
 .release-goals {
   display: flex;
@@ -2598,27 +2611,51 @@ button.task-view-check-row:hover {
   flex-shrink: 0;
 }
 
-/* Out on production. The green this stylesheet already uses for `Done` — `#1a7f37`, the repeated literal,
-   see `.goal-status.done` — because it is the same statement about a release that `Done` is about a
-   goal: this got where it was going. Filled, where the status pill beside a goal is outlined: on a row of
-   muted chips it is the one fact the list is most often scanned for. */
-.release-prod-flag {
+/* Where a release is out: one chip per environment, in the order it reached them. Outlined and muted,
+   because they report rather than ask — the amber badge above is the one thing on this row that wants
+   something done. The label is drawn as the project spells it, not upper-cased into a badge: it is the
+   project's own word for the place, and the word somebody will type to filter by it. */
+.release-env {
   font-size: 11px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: #ffffff;
-  background: #1a7f37;
+  letter-spacing: 0.02em;
+  color: var(--text-muted);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
   border-radius: 10px;
   padding: 1px 8px;
   white-space: nowrap;
   flex-shrink: 0;
 }
 
-/* The same fact in words, at the top of an open release. */
-.release-on-prod {
-  font-size: 12px;
-  color: #1a7f37;
-  font-weight: 600;
+/* Production, and the only environment drawn differently. The green this stylesheet already uses for
+   `Done` — `#1a7f37`, the repeated literal, see `.goal-status.done` — because it is the same statement
+   about a release that `Done` is about a goal: this got where it was going. Filled, on a row of outlined
+   chips: "is it live" is the one fact the list is most often scanned for. */
+.release-env.prod {
+  color: #ffffff;
+  background: #1a7f37;
+  border-color: #1a7f37;
+}
+
+/* The way to a release's own page, at the end of its row. Drawn like the eye on a goal and the chain link
+   on a card — a glyph, dimmed until the pointer is on the row — because it is the same kind of thing: a
+   way somewhere else, on a line whose text is what the line is for. An anchor all the same, so the
+   browser's own "open in a new window" works on it. */
+.release-open-link {
+  flex-shrink: 0;
+  padding: 0 2px;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--text-muted);
+  text-decoration: none;
+  opacity: 0.45;
+}
+
+.release-head:hover .release-open-link,
+.release-open-link:hover,
+.release-open-link:focus-visible {
+  opacity: 1;
+  text-decoration: none;
 }
 
 /* The thread under an open release. The comments themselves are drawn with the dialogs' own classes —
@@ -2733,6 +2770,23 @@ button.task-view-check-row:hover {
   white-space: nowrap;
 }
 
+/* Where the build of a service can be looked at. One line, clipped: an address is followed rather than
+   read, the whole of it is in the tooltip, and a run url left to wrap would make this the tallest cell of
+   the row for the least-read value in it. `max-width` on a cell only bites together with the `0`-width
+   trick, hence the block inside. */
+.release-service-link {
+  font-size: 12px;
+  max-width: 260px;
+}
+
+.release-service-link a,
+.release-service-link span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* What has to change in a service's settings. The same amber as the flag on the folded row, so the badge
    that says "there is one" and the block that says what it is are visibly the same statement — and an
    edge down its left, so it reads as attached to the service above it rather than as a row of its own. */
@@ -2803,5 +2857,30 @@ button.task-view-check-row:hover {
   .release-head.static .release-meta {
     margin-left: 0;
   }
+}
+
+/* A release on a page of its own — what a link to one opens. The card is the list's card; this is only
+   the frame around it. */
+.release-page {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* The id in front of the title: the half somebody quotes, in the face every id here is written in. */
+.release-page-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--text-faint);
+  margin-right: 10px;
+}
+
+/* The way back to the list, held at the far edge with `auto` rather than by ordering — the same reason
+   the search box on Home is — so it stays there when the header wraps under a long title. */
+.release-page-back {
+  margin-left: auto;
+  font-size: 13px;
+  white-space: nowrap;
 }
 

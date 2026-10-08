@@ -16,6 +16,10 @@ use crate::tasks::TaskCommentResponse;
 // not change, which is why the screen can mark the services where they do. `description` is everything
 // else worth saying about this service's part of the release.
 //
+// `release_link` is where the build of that version can be looked at — the GitHub release, or the run of the
+// workflow that built the image. A link and nothing else: nothing here talks to GitHub. Empty when nobody
+// recorded one, which is the ordinary state of a service that was built and rolled out by hand.
+//
 // `datetime_unix_seconds` is when this service went out, as whoever recorded the release said — unlike
 // every other moment on this wire, it is not stamped by the server.
 #[derive(Serialize, Deserialize, MyHttpObjectStructure, Clone, Debug, PartialEq)]
@@ -23,6 +27,8 @@ pub struct ServiceReleaseResponse {
     pub microservice_id: String,
     pub version: String,
     pub git_hash: String,
+    #[serde(default)]
+    pub release_link: String,
     pub datetime_unix_seconds: i64,
     #[serde(default)]
     pub settings_update_note: String,
@@ -69,12 +75,13 @@ pub struct ReleaseResponse {
     pub services: Vec<ServiceReleaseResponse>,
     #[serde(default)]
     pub goals: Vec<ReleaseGoalResponse>,
-    // When this release was marked as out on PRODUCTION, and absent while it is not. A release is written
-    // down when it ships somewhere — usually a test stand first — and reaching production is a later mark
-    // on the same release. One field for both "is it on prod" and "since when", so the two cannot
-    // disagree: read the first with `is_released_on_prod`.
+    // The environments this release is out on, as labels — `Dev`, `Prod` — in the order it reached them.
+    // A release is written down when it ships somewhere, usually a test stand first, and reaching the next
+    // environment is another label on the SAME release rather than a second release. Free text and not a
+    // fixed list: which environments there are is each project's own business. A label is compared
+    // ignoring case — ask through `is_on_env` rather than with `contains`.
     #[serde(default)]
-    pub released_on_prod_unix_seconds: Option<i64>,
+    pub envs: Vec<String>,
     // The release's thread, oldest first — what was said about the rollout, as opposed to `release_notes`,
     // which say what changed. The same shape a task's and a goal's thread travel in.
     #[serde(default)]
@@ -96,13 +103,52 @@ pub struct GetReleasesInputModel {
     pub project: String,
 }
 
-/// Whether a release has gone out to production.
+// One release, named the way its page's address names it: `release/{project}/{release}`.
+#[derive(MyHttpInput)]
+pub struct GetReleaseInputModel {
+    #[http_body(name: "project", description: "Which project the release belongs to, by prefix — RMS")]
+    pub project: String,
+    #[http_body(name: "release", description: "Which release, by its id — RMS-R12 — or by its bare number")]
+    pub release: String,
+}
+
+/// The address of a release's own page, as a path on this origin: `/release/RMS/RMS-R12`.
 ///
-/// A function over the one field rather than a second field beside it: a bool on the wire next to the
-/// moment would be two statements of one fact, and the first build to set one and forget the other would
-/// draw a release that is and is not on prod.
-pub fn is_released_on_prod(release: &ReleaseResponse) -> bool {
-    release.released_on_prod_unix_seconds.is_some()
+/// **The one place the shape of that address is written down** for whoever BUILDS a link — the button
+/// that opens a release in a new tab, and anything that copies one. The router states the same shape to
+/// read it, and a test holds the two together. The project comes first and on its own, although the id
+/// repeats it: the address is `release/{project}/{release}`, so a link can be read without knowing how an
+/// id is put together, and it is the project that access is decided on.
+///
+/// Nothing is encoded because nothing in either half can need it — a prefix and a handle are ASCII
+/// alphanumerics, an underscore and a dash.
+pub fn release_page_path(release: &ReleaseResponse) -> String {
+    format!("/release/{}/{}", release.project, release.id)
+}
+
+/// Whether two labels name the same environment.
+///
+/// **The one definition of an environment's identity**, shared by the server that stores the labels and
+/// the screen that filters by them: surrounding whitespace and letter case do not count, so `prod`, `Prod`
+/// and ` PROD ` are one environment. It has to be one function — a list that de-duplicated by one rule and
+/// a filter that matched by another would show a release under a label it could not be found by.
+pub fn same_env(left: &str, right: &str) -> bool {
+    left.trim().to_lowercase() == right.trim().to_lowercase()
+}
+
+/// Whether a release is out on an environment.
+pub fn is_on_env(release: &ReleaseResponse, env: &str) -> bool {
+    release.envs.iter().any(|itm| same_env(itm, env))
+}
+
+/// Whether a label names production.
+///
+/// For the one thing a screen does differently for it: an environment's label is drawn as a quiet chip,
+/// and production's is drawn in the colour of something finished, because "is it live" is the question a
+/// list of releases is most often scanned for. Two spellings and no more — a label is free text, and
+/// guessing that `live` or `main` means production would colour a row on a guess.
+pub fn is_production_env(label: &str) -> bool {
+    same_env(label, "prod") || same_env(label, "production")
 }
 
 /// Whether any service in a release changes its settings.
@@ -170,6 +216,7 @@ mod tests {
             microservice_id: "my-service".to_string(),
             version: "1.2.3".to_string(),
             git_hash: "0e299dc".to_string(),
+            release_link: String::new(),
             datetime_unix_seconds: 0,
             settings_update_note: settings_update_note.to_string(),
             description: String::new(),
@@ -186,7 +233,7 @@ mod tests {
             date_unix_seconds: 0,
             services,
             goals: Vec::new(),
-            released_on_prod_unix_seconds: None,
+            envs: Vec::new(),
             comments: Vec::new(),
             created_unix_seconds: 0,
             updated_unix_seconds: 0,
@@ -194,23 +241,53 @@ mod tests {
         }
     }
 
-    /// A release recorded by a build that did not know about production or about threads has neither
-    /// field on the wire, and has to read as what it was: not on prod, with nothing said about it.
+    /// A release recorded by a build that did not know about environments or about threads has neither
+    /// field on the wire, and has to read as what it was: out nowhere in particular, with nothing said
+    /// about it. That includes what 0.2.0 sent instead — an unknown field is passed over, not an error.
     #[test]
-    fn a_release_without_the_newer_fields_reads_as_not_on_prod_and_unremarked() {
+    fn a_release_without_the_newer_fields_reads_as_out_nowhere_and_unremarked() {
         let raw = r#"{"id":"RMS-R1","project":"RMS","title":"t","description":"","release_notes":"",
-            "date_unix_seconds":0,"created_unix_seconds":0,"updated_unix_seconds":0,
-            "deleted_unix_seconds":null}"#;
+            "date_unix_seconds":0,"released_on_prod_unix_seconds":1791331200,
+            "created_unix_seconds":0,"updated_unix_seconds":0,"deleted_unix_seconds":null}"#;
 
         let read: ReleaseResponse = serde_json::from_str(raw).unwrap();
 
-        assert!(!is_released_on_prod(&read));
+        assert!(read.envs.is_empty());
+        assert!(!is_on_env(&read, "Prod"));
         assert!(read.comments.is_empty());
+    }
 
-        let mut on_prod = release(Vec::new());
-        on_prod.released_on_prod_unix_seconds = Some(MIDNIGHT);
+    /// A label is found however it is spelled, and only when it is the WHOLE label: `Prod` must not
+    /// answer for `Pre-Prod`, which is exactly the release that has not got there yet.
+    #[test]
+    fn a_release_is_on_an_environment_whatever_the_case_of_the_label() {
+        let mut out = release(Vec::new());
+        out.envs = vec!["Dev".to_string(), "Pre-Prod".to_string()];
 
-        assert!(is_released_on_prod(&on_prod));
+        assert!(is_on_env(&out, "Dev"));
+        assert!(is_on_env(&out, "dev"));
+        assert!(is_on_env(&out, " DEV "));
+        assert!(is_on_env(&out, "pre-prod"));
+
+        assert!(!is_on_env(&out, "Prod"));
+        assert!(!is_on_env(&out, ""));
+        assert!(!is_on_env(&release(Vec::new()), "Dev"));
+    }
+
+    #[test]
+    fn production_is_recognised_by_its_two_spellings_and_nothing_else() {
+        for label in ["Prod", "prod", "PROD", " Production "] {
+            assert!(is_production_env(label), "{label:?}");
+        }
+
+        for label in ["Dev", "Pre-Prod", "prod-eu", "live", ""] {
+            assert!(!is_production_env(label), "{label:?}");
+        }
+    }
+
+    #[test]
+    fn a_release_has_one_address() {
+        assert_eq!(release_page_path(&release(Vec::new())), "/release/RMS/RMS-R1");
     }
 
     /// Whitespace is not a note: a release whose services all say nothing must not be flagged, or the flag
@@ -225,15 +302,16 @@ mod tests {
         ])));
     }
 
-    /// A release written before a field existed still has to read: the two notes are the fields most
-    /// likely to be absent from an older payload.
+    /// A release written before a field existed still has to read: the two notes and the link are the
+    /// fields most likely to be absent from an older payload.
     #[test]
-    fn a_service_without_its_notes_still_reads() {
+    fn a_service_without_its_notes_or_its_link_still_reads() {
         let raw = r#"{"microservice_id":"a","version":"1","git_hash":"abc1234","datetime_unix_seconds":5}"#;
 
         let read: ServiceReleaseResponse = serde_json::from_str(raw).unwrap();
 
         assert_eq!(read.settings_update_note, "");
         assert_eq!(read.description, "");
+        assert_eq!(read.release_link, "");
     }
 }

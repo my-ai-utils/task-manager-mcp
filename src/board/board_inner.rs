@@ -449,6 +449,34 @@ impl BoardInner {
         result
     }
 
+    /// Every environment a project's releases name, once each, as the project spells it.
+    ///
+    /// Nothing stores this list — an environment exists for as long as some live release carries its
+    /// label, the way a board's labels are read off its tasks. It is what a new label is spelled after
+    /// when it is added (see `EnvsPatch::apply`), and what a caller is shown so that it can reuse a
+    /// spelling instead of inventing a second one.
+    ///
+    /// Sorted ignoring case, so the answer is the same whichever order the releases were recorded in. Two
+    /// spellings of one environment cannot normally exist; where an import brought one in, the spelling
+    /// on the newest release is the one kept.
+    pub fn envs_of_project(&self, project_id: &str) -> Vec<String> {
+        let mut result: Vec<String> = Vec::new();
+
+        for release in self.releases_of_project(project_id) {
+            for env in &release.envs {
+                if !result
+                    .iter()
+                    .any(|itm| task_manager_shared::releases::same_env(itm, env))
+                {
+                    result.push(env.clone());
+                }
+            }
+        }
+
+        result.sort_by_key(|itm| itm.to_lowercase());
+        result
+    }
+
     /// A project's releases, deleted ones included, in no particular order. One caller, the export, for
     /// the reason given on [`Self::goals_of_project_including_deleted`].
     pub fn releases_of_project_including_deleted(

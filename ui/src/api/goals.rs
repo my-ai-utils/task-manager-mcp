@@ -7,13 +7,19 @@ use super::{authed, handle_http_empty, handle_http_response};
 
 /// Read a project's goals.
 ///
-/// Reads only, like the board: goals are opened, renamed and closed through `/mcp`. Archived ones are left
-/// out — a goal closed longer ago than the project's window is history, and history is reached by searching
-/// for its id.
-pub async fn get_goals(project: &str) -> Result<GoalsResponse, RequestError> {
+/// Reads only, like the board: goals are opened, renamed and closed through `/mcp`.
+///
+/// `include_archived` is the switch `get_tasks` has, and means the same thing. Without it a goal closed
+/// longer ago than the project's window is left out — that is the list the Goals screen draws. With it the
+/// history comes too, which is what a screen needs when it is asked for ONE goal by its id and that goal
+/// may have shipped months ago: a release names the goal it carried for as long as the release exists.
+pub async fn get_goals(
+    project: &str,
+    include_archived: bool,
+) -> Result<GoalsResponse, RequestError> {
     let request = GetGoalsInputModel {
         project: project.to_string(),
-        include_archived: None,
+        include_archived: Some(include_archived),
     };
 
     handle_http_response(authed("/api/goals/v1/list", HttpVerb::Post, request).await).await

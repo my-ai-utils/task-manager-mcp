@@ -66,3 +66,26 @@ pub fn copy_to_clipboard(text: &str) -> bool {
     let _ = clipboard.write_text(text);
     true
 }
+
+/// What the browser tab is called right now.
+///
+/// Read so that it can be put back: nearly every screen leaves the title alone, so the one that changes
+/// it has to return what it found — see [`set_document_title`].
+pub fn document_title() -> String {
+    web_sys::window()
+        .and_then(|window| window.document())
+        .map(|document| document.title())
+        .unwrap_or_default()
+}
+
+/// Name the browser tab.
+///
+/// For a screen that is opened in a tab of its own and is one of several alike — a release's page: five
+/// tabs all called "Task Manager" are five tabs to click through. A screen that sets it puts the old one
+/// back when it is left, because the router changes screens without loading a page and nothing else
+/// would.
+pub fn set_document_title(title: &str) {
+    if let Some(document) = web_sys::window().and_then(|window| window.document()) {
+        document.set_title(title);
+    }
+}

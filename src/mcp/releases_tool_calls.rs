@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::app::AppContext;
 use crate::mcp::{CommentView, ReleaseView, ServiceReleaseInput};
-use crate::scripts::{NewRelease, ReleasePatch, ServicesPatch};
+use crate::scripts::{EnvsPatch, NewRelease, ReleasePatch, ServicesPatch};
 
 /// How many releases one listing returns when the caller does not say, and the most it will return.
 ///
@@ -47,9 +47,13 @@ pub struct ReleasesListInput {
     )]
     pub microservice_id: Option<String>,
     #[property(
-        description = "Pass true for ONLY the releases that are out on production, false for only the ones that are not yet. Omit for both. With `microservice_id` and the default order, true answers 'which version of this service is live' in one row"
+        description = "Only the releases that are out on this environment, by its label — `Prod`. Case does not matter. With `microservice_id` and the default order, `Prod` answers 'which version of this service is live' in one row. The labels a project uses come back in `envs` on every listing. Omit for releases wherever they are"
     )]
-    pub released_on_prod: Option<bool>,
+    pub env: Option<String>,
+    #[property(
+        description = "Only the releases that are NOT out on this environment, by its label. `Prod` here is what has been recorded and has not reached production yet — the list of what is still to be rolled out. May be combined with `env`: `env: Dev` and `not_on_env: Prod` is what sits on Dev waiting. Omit for releases wherever they are"
+    )]
+    pub not_on_env: Option<String>,
     #[property(
         description = "How many to return, newest first. Omitted gives 20; the most is 100. `total` in the answer says how many there are, so you can tell a short history from a truncated one"
     )]
@@ -68,6 +72,10 @@ pub struct ReleasesListResponse {
         description = "How many releases matched altogether. Bigger than `amount` means `limit` cut the list and the older ones are not shown"
     )]
     pub total: i32,
+    #[property(
+        description = "Every environment label the releases of this project carry, once each — the project's vocabulary, whatever the filters. REUSE THESE SPELLINGS when you put a release on an environment: a label that matches one in any case is stored in the spelling shown here, and only one the project has never used is taken as you wrote it. Empty means no release of the project says where it is out"
+    )]
+    pub envs: Vec<String>,
 }
 
 pub struct ReleasesListHandler {
@@ -90,8 +98,10 @@ unconditionally, and the same rollout written down twice is two releases on a li
 Each release comes back whole: its notes, and one entry per microservice with the version, the commit it \
 was built from and — in `settings_update_note` — whatever has to change in that service's settings. \
 Filter by `goal` for the releases one feature went out in, by `microservice_id` for the history of one \
-service, or by `released_on_prod` for what has actually reached production — a release is recorded when \
-it ships anywhere, so the unfiltered list is everything that went out, not everything that is live.\
+service, or by `env` for what is out on one environment — `Prod` for what has actually reached \
+production. A release is recorded when it ships anywhere, so the unfiltered list is everything that went \
+out, not everything that is live; each release says where it is in its own `envs`, and `not_on_env` \
+turns the question round to what has not got there yet.\
 \
 A project with no releases is a legitimate answer, not an error. Nothing ages off this list: unlike the \
 board it has no archive window, so it is capped by `limit` instead and reports `total`.";
@@ -142,6 +152,18 @@ impl McpToolCall<ReleasesListInput, ReleasesListResponse> for ReleasesListHandle
             .map(str::trim)
             .filter(|itm| !itm.is_empty());
 
+        let env = model
+            .env
+            .as_deref()
+            .map(str::trim)
+            .filter(|itm| !itm.is_empty());
+
+        let not_on_env = model
+            .not_on_env
+            .as_deref()
+            .map(str::trim)
+            .filter(|itm| !itm.is_empty());
+
         let matched: Vec<_> = releases
             .iter()
             .filter(|release| match microservice_id {
@@ -151,8 +173,12 @@ impl McpToolCall<ReleasesListInput, ReleasesListResponse> for ReleasesListHandle
                     .any(|itm| itm.microservice_id == wanted),
                 None => true,
             })
-            .filter(|release| match model.released_on_prod {
-                Some(wanted) => release.is_released_on_prod() == wanted,
+            .filter(|release| match env {
+                Some(wanted) => release.is_on_env(wanted),
+                None => true,
+            })
+            .filter(|release| match not_on_env {
+                Some(unwanted) => !release.is_on_env(unwanted),
                 None => true,
             })
             .collect();
@@ -167,6 +193,9 @@ impl McpToolCall<ReleasesListInput, ReleasesListResponse> for ReleasesListHandle
             amount: releases.len() as i32,
             total: matched.len() as i32,
             releases,
+            // The project's, not the filtered list's: it is the vocabulary to write with, and a caller
+            // who filtered down to one environment still needs the names of the others.
+            envs: board.envs_of_project(&project.id),
         })
     }
 }
@@ -194,7 +223,7 @@ pub struct ReleasesCreateInput {
     )]
     pub date: Option<String>,
     #[property(
-        description = "One entry per microservice this release touched: its `microservice_id`, the `version` that went out, the `git_hash` that version was built from, and optionally `datetime`, `settings_update_note` and `description`. A release of one feature usually touches several services — list them all here rather than recording a release each. May be omitted and filled in with releases_update as the services go out"
+        description = "One entry per microservice this release touched: its `microservice_id`, the `version` that went out, the `git_hash` that version was built from, and optionally `release_link`, `datetime`, `settings_update_note` and `description`. A release of one feature usually touches several services — list them all here rather than recording a release each. May be omitted and filled in with releases_update as the services go out"
     )]
     pub services: Option<Vec<ServiceReleaseInput>>,
     #[property(
@@ -202,9 +231,9 @@ pub struct ReleasesCreateInput {
     )]
     pub goal: Option<String>,
     #[property(
-        description = "Pass true ONLY if this release is already out on production as you record it. Omit otherwise — a release normally goes to a test stand first, and the mark is put on later with releases_update, when production has actually been rolled"
+        description = "The environments this release is ALREADY out on as you record it, as labels — normally the one stand it has just been rolled to, like `Dev`. One word each. Spell them as `envs` on releases_list reports the project's: a label that matches one of those in any case is stored in that spelling. Omit when it has not gone anywhere yet; the rest are added with add_envs on releases_update as the release reaches them — production last, and only once it has actually been rolled"
     )]
-    pub released_on_prod: Option<bool>,
+    pub envs: Option<Vec<String>>,
 }
 
 pub struct ReleasesCreateHandler {
@@ -222,7 +251,13 @@ impl ToolDefinition for ReleasesCreateHandler {
     const DESCRIPTION: &'static str = "Record a release — the fact that a feature went out, and in \
 what. ONE RELEASE IS ONE FEATURE, ACROSS HOWEVER MANY MICROSERVICES IT TOUCHED: the release says what \
 changed (`title`, `description`, `release_notes`), and each entry in `services` says what was deployed — \
-the microservice, its version, the commit that version was built from, and when.\
+the microservice, its version, the commit that version was built from, and when. When CI built what \
+went out, give each service its `release_link` — the url of the GitHub release or of the workflow run \
+that built the image — so the build is one click from the record of it.\
+\
+SAY WHERE IT IS OUT. `envs` are the environments the release is on, as labels — `Dev`, `Prod`. Pass the \
+one it has just been rolled to; reaching the next is a label added to this same release with \
+releases_update, never a second release.\
 \
 NAME THE GOAL IT SHIPS. Pass `goal` and the release is attached in the same call: the goal is the \
 description of the feature, the release is the record of it going out, and from then on the goal lists \
@@ -253,7 +288,7 @@ impl McpToolCall<ReleasesCreateInput, ReleaseWriteResponse> for ReleasesCreateHa
                 date: model.date,
                 services: ServiceReleaseInput::into_new(model.services),
                 goal: model.goal,
-                released_on_prod: model.released_on_prod.unwrap_or(false),
+                envs: model.envs.unwrap_or_default(),
             },
         )
         .await?;
@@ -281,7 +316,7 @@ pub struct ReleasesUpdateInput {
     )]
     pub date: Option<String>,
     #[property(
-        description = "Services to add to the release, or to CORRECT: an entry whose `microservice_id` the release already has rewrites that entry in place — its version and git_hash are replaced, and its `datetime`, `settings_update_note` and `description` only if you pass them. Anything else is added. This is how a release grows as its services go out one by one"
+        description = "Services to add to the release, or to CORRECT: an entry whose `microservice_id` the release already has rewrites that entry in place — its version and git_hash are replaced, and its `release_link`, `datetime`, `settings_update_note` and `description` only if you pass them. Anything else is added. This is how a release grows as its services go out one by one"
     )]
     pub add_services: Option<Vec<ServiceReleaseInput>>,
     #[property(
@@ -289,9 +324,13 @@ pub struct ReleasesUpdateInput {
     )]
     pub remove_services: Option<Vec<String>>,
     #[property(
-        description = "Pass true to MARK THE RELEASE AS OUT ON PRODUCTION — when the rollout to prod has actually happened. The moment is stamped for you, and marking one that is already marked changes nothing. Pass false to take the mark off, for a release that was pulled back from production. Omit to leave it alone. Worth a `comment` in the same call saying how the rollout went"
+        description = "Environments the release has REACHED, as labels to put on it — `Prod` when the rollout to production has actually happened. One word each. Spell them as `envs` on releases_list reports the project's; a label that matches one of those in any case is stored in that spelling, and one the release already carries changes nothing. Worth a `comment` in the same call saying how the rollout went"
     )]
-    pub released_on_prod: Option<bool>,
+    pub add_envs: Option<Vec<String>>,
+    #[property(
+        description = "Environments to take the release OFF, by label, in any case — for one that was pulled back from there. Applied after add_envs, so a label passed to both ends up removed. A label the release does not carry is not an error"
+    )]
+    pub remove_envs: Option<Vec<String>>,
     #[property(
         description = "Pass false to UNDELETE a release somebody removed, which also puts it back on every goal that listed it. Pass true to delete it, which releases_delete also does. Omit to leave it alone"
     )]
@@ -319,12 +358,14 @@ impl ReleasesUpdateHandler {
 impl ToolDefinition for ReleasesUpdateHandler {
     const FUNC_NAME: &'static str = "releases_update";
     const DESCRIPTION: &'static str = "Change a release: rename it, rewrite its notes, re-date it, \
-change which microservices are in it, or mark it as out on production. Only the fields you pass change.\
+change which microservices are in it, or say which environments it is out on. Only the fields you pass \
+change.\
 \
-REACHING PRODUCTION IS A MARK ON THE RELEASE, NOT A SECOND RELEASE. A release is recorded when it ships \
-somewhere, usually a test stand; when the same versions go out to prod, pass `released_on_prod: true` \
-here rather than recording them again. That mark is what tells 'went out' from 'is live', and \
-releases_list filters by it.\
+REACHING AN ENVIRONMENT IS A LABEL ON THE RELEASE, NOT A SECOND RELEASE. A release is recorded when it \
+ships somewhere, usually a test stand; when the same versions go out to production, pass `Prod` in \
+`add_envs` here rather than recording them again. Its `envs` are what tell 'went out' from 'is live', \
+and releases_list filters by them. `remove_envs` takes a label off, for a release pulled back \
+from an environment.\
 \
 A RELEASE NAMES A MICROSERVICE ONCE. `add_services` with an id the release already has corrects that \
 entry instead of adding a second one, which is how a mistyped version or a missing settings note is \
@@ -334,7 +375,8 @@ WHICH GOAL A RELEASE BELONGS TO IS NOT CHANGED HERE. The goal lists its releases
 goals_update with add_releases or remove_releases.\
 \
 `deleted: false` brings a deleted release back. Deleting is for a release that was recorded by mistake; \
-one that went out and was rolled back DID happen, and is better kept, unmarked and commented.";
+one that went out and was rolled back DID happen, and is better kept, taken off the environment it was \
+pulled back from and commented.";
 }
 
 #[async_trait::async_trait]
@@ -355,7 +397,10 @@ impl McpToolCall<ReleasesUpdateInput, ReleaseWriteResponse> for ReleasesUpdateHa
                     add: ServiceReleaseInput::into_new(model.add_services),
                     remove: model.remove_services.unwrap_or_default(),
                 },
-                released_on_prod: model.released_on_prod,
+                envs: EnvsPatch {
+                    add: model.add_envs.unwrap_or_default(),
+                    remove: model.remove_envs.unwrap_or_default(),
+                },
                 deleted: model.deleted,
                 comment: model.comment,
                 comment_by: model.comment_by,
@@ -512,8 +557,8 @@ impl ToolDefinition for ReleasesDeleteHandler {
 duplicate, or one written against the wrong project.\
 \
 NOT FOR A RELEASE THAT WAS ROLLED BACK. That one happened: it went out, and then it was taken back, and \
-both halves are worth knowing months later. Keep it, take its production mark off with releases_update \
-if it had one, and say what became of it on its thread.\
+both halves are worth knowing months later. Keep it, take it off the environments it was pulled back \
+from with remove_envs on releases_update, and say what became of it on its thread.\
 \
 IT IS A FLAG, NOT A REMOVAL. The release leaves releases_list and every goal that listed it, and stays \
 reachable by its id, which reports it as deleted. The goals are not edited — they simply stop showing it \

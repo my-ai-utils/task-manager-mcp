@@ -255,6 +255,10 @@ pub struct ServiceReleaseView {
     )]
     pub git_hash: String,
     #[property(
+        description = "Where the build of this version can be looked at — the url of the GitHub release, or of the workflow run that built the image. Empty when nobody recorded one, which is normal for a service built and rolled out by hand. A link somebody pasted: nothing here asks GitHub whether the build passed"
+    )]
+    pub release_link: String,
+    #[property(
         description = "When this service went out, as `2026-10-07T14:30:00Z` (UTC). What whoever recorded the release SAID — nothing here checks it against a deploy"
     )]
     pub datetime: String,
@@ -302,13 +306,9 @@ pub struct ReleaseView {
     )]
     pub goals: Vec<String>,
     #[property(
-        description = "TRUE ONCE THIS RELEASE IS OUT ON PRODUCTION. A release is recorded when it ships somewhere — usually a test stand first — so false does not mean it is nowhere, it means it has not reached prod. This is the field that answers 'is it live for users', and what `released_on_prod` on releases_list filters by. Set it with releases_update when the rollout to production has actually happened, not when it is planned"
+        description = "THE ENVIRONMENTS THIS RELEASE IS OUT ON, as labels — `Dev`, `Prod` — in the order it reached them. A release is recorded when it ships somewhere, usually a test stand first, and reaching the next environment is another label on the SAME release. So this is the field that answers 'is it live for users': a release without `Prod` here has not reached production, whatever else it is on. Empty means nobody has said where it is out. Put a label on with add_envs on releases_update when the rollout has actually happened, and take it off with remove_envs if the release is pulled back"
     )]
-    pub released_on_prod: bool,
-    #[property(
-        description = "When it was marked as on production, unix seconds (UTC); absent while it is not. Stamped by the server at the moment of the mark, so it is when somebody SAID it reached prod. Cleared when the mark is taken off"
-    )]
-    pub released_on_prod_unix_seconds: Option<i64>,
+    pub envs: Vec<String>,
     #[property(
         description = "How many notes are on the release's thread — how the rollout went, what was noticed afterwards, why it was pulled back. Read them with releases_get_comments. The notes say what changed; the thread says what happened"
     )]
@@ -341,6 +341,7 @@ impl ReleaseView {
                     microservice_id: itm.microservice_id.clone(),
                     version: itm.version.clone(),
                     git_hash: itm.git_hash.clone(),
+                    release_link: itm.release_link.clone(),
                     datetime: caller_moment_to_view(itm.datetime),
                     settings_update_note: itm.settings_update_note.clone(),
                     description: itm.description.clone(),
@@ -351,10 +352,7 @@ impl ReleaseView {
                 .iter()
                 .map(|goal| crate::board::compose_goal_handle(&project.prefix, goal.number))
                 .collect(),
-            released_on_prod: release.is_released_on_prod(),
-            released_on_prod_unix_seconds: release
-                .released_on_prod_moment
-                .map(|itm| itm.unix_microseconds / 1_000_000),
+            envs: release.envs.clone(),
             comments_amount: release.comments.len() as i32,
             created_unix_seconds: release.created.unix_microseconds / 1_000_000,
             updated_unix_seconds: release.updated.unix_microseconds / 1_000_000,
@@ -379,6 +377,10 @@ pub struct ServiceReleaseInput {
     )]
     pub git_hash: String,
     #[property(
+        description = "Where the build of this version can be looked at: the url of the GitHub release, or of the workflow run that built the image — `https://github.com/<owner>/<repo>/releases/tag/1.2.3`. Pass it whenever CI built what went out, so whoever reads the release can open the build. It has to be a url; omit it for a service built by hand. On a service the release already has, omitting it leaves the link alone and an empty string takes it off"
+    )]
+    pub release_link: Option<String>,
+    #[property(
         description = "When this service went out: `2026-10-07`, or a date and time like `2026-10-07T14:30:00Z`. A zone offset such as `+03:00` is honoured; no zone means UTC. Omit for now, which is right when you are recording it as it happens"
     )]
     pub datetime: Option<String>,
@@ -401,6 +403,7 @@ impl ServiceReleaseInput {
                 microservice_id: itm.microservice_id,
                 version: itm.version,
                 git_hash: itm.git_hash,
+                release_link: itm.release_link,
                 datetime: itm.datetime,
                 settings_update_note: itm.settings_update_note,
                 description: itm.description,

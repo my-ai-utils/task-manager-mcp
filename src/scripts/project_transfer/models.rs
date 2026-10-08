@@ -315,10 +315,14 @@ pub struct ReleaseFileModel {
     pub date: String,
     #[serde(default)]
     pub services: Vec<ServiceReleaseFileModel>,
-    // When it was marked as out on production, and absent while it is not. The MOMENT travels rather than
-    // a yes or no, because that is what the board holds: a release that reached production in March must
-    // not arrive saying it got there on the day of the import.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    // The environments it is out on, as labels, in the order it reached them — legible, because a label
+    // is one word and is what somebody opening this file is looking for. Left out of the file when there
+    // are none, like every other list here that is usually empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub envs: Vec<String>,
+    // LEGACY, read and never written. An archive exported by 0.2.0 says "out on production" here, as a
+    // moment, and has no `envs` at all; it arrives as the label `Prod` — see `build_release`.
+    #[serde(default, skip_serializing)]
     pub released_on_prod: Option<String>,
     pub created: String,
     pub updated: String,
@@ -333,12 +337,17 @@ pub struct ReleaseFileModel {
 /// they are what somebody opening this file is looking for. `settings_update_note` and `description` are
 /// prose a person wrote, so they travel base64 and say so in their names.
 ///
+/// `release_link` is legible for the same reason the identifiers are: a url is one word. It is left out of
+/// the file for a service that has none, which is most of them on a board whose builds are done by hand.
+///
 /// `datetime` is when this service went out, as whoever recorded the release said it.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ServiceReleaseFileModel {
     pub microservice_id: String,
     pub version: String,
     pub git_hash: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub release_link: String,
     pub datetime: String,
     #[serde(default)]
     pub settings_update_note_base64: String,

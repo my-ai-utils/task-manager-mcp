@@ -378,6 +378,7 @@ changed for a reader — `title`, `description`, `release_notes` and the `date` 
 | `microservice_id` | The name the service is deployed under. The identity of the entry within its release. |
 | `version` | Which version of it went out. |
 | `git_hash` | The commit that version was built from. |
+| `release_link` | Where the build of that version can be looked at — the GitHub release, or the run that built the image. Empty when there is none. |
 | `datetime` | When this service went out. |
 | `settings_update_note` | What has to change in this service's settings. Empty when nothing does. |
 | `description` | Anything else worth saying about this service's part of the release. |
@@ -403,23 +404,44 @@ not a line in the notes, the folded row on the Releases screen carries a flag wh
 and the open release draws it as a block of its own under that service. Everything else goes in
 `description`.
 
-**Reaching production is a mark on the release, not a second release.** A release is written down when
-it ships *somewhere* — usually a test stand first — so the list of releases is everything that went out,
-not everything that is live. When the same versions of the same services are rolled out to production the
-release is marked, `released_on_prod`, and that mark is what "what is actually on prod" is filtered by:
-`releases_list` takes it, and so does the Releases screen. With a microservice picked beside it, the top
-row is the version of that service users are on. It is stored as a **moment** and not a bool —
-`released_on_prod_moment`, the way `close_moment` and `deleted_moment` are — because "is it on prod" and
-"since when" are one fact and two columns for it could disagree; the surfaces report both, derived from
-the one. It is stamped when the mark is put on, **kept** if it is put on again — that is when the release
-got there, and saying so twice is not a second rollout — and cleared whole when it is taken off, so a
-release pulled back from production stops answering to "what is live" at once.
+**Where a release is out is a list of labels on it, not a second release.** A release is written down
+when it ships *somewhere* — usually a test stand first — so the list of releases is everything that went
+out, not everything that is live. Each release carries `envs`: the environments it is on, as labels —
+`Dev`, `Prod` — in the order it reached them. When the same versions of the same services are rolled out
+further, the label is added to the release that is already there (`add_envs` on `releases_update`), and
+`remove_envs` takes one off for a release pulled back. Those labels are what "what is actually on prod"
+is filtered by: `releases_list` takes `env` and `not_on_env`, and the Releases screen offers each
+environment both ways round. With a microservice picked beside it, the top row is the version of that
+service users are on.
+
+Labels and not a flag per environment, because which environments exist is the project's own business:
+one has Dev and Prod, another a stand per client. Nothing stores the list — an environment exists for as
+long as some release carries its label, the way a board's labels are read off its tasks — and
+`releases_list` reports the ones a project uses so that a caller can reuse them. Three rules keep a
+free-text field from drifting. A label is **one word**: it is an identity, what a list is filtered by,
+and `Pre Prod` typed once and `Pre-Prod` the next time would be two environments for one stand. A label
+is **one environment however it is cased**, on a release and in every filter. And there is **one
+spelling per project**: a label that matches one the project's releases already carry is stored in
+*that* spelling, so three agents writing `Prod`, `prod` and `PROD` come out as one chip.
+
+The column is `envs`, `jsonb`, and nullable — it arrived on a table 0.2.0 had already created. That
+build kept a single fact instead, a moment in `released_on_prod_moment`; a row it marked and nobody has
+written since still has that and a NULL `envs`, and it loads as the label `Prod`. Every write stores a
+real array and empties the old column, so it drains as rows are touched, and the schema sync never drops
+a column, so the field can simply be deleted from the row model once nothing predates `envs`.
+
+**`release_link` is a link somebody pasted, and it is held to being one.** When CI built what went out,
+the service entry carries where that build can be looked at — the url of the GitHub release, or of the
+workflow run that built the image — so the build is one click from the record of it. Nothing here talks
+to GitHub: it says where to look, not whether the build passed. It has to be an `http(s)` address with no
+whitespace in it, because whatever is stored is drawn as an anchor; it is **not** held to `github.com`,
+for the reason a task's build link is not — an enterprise install and another CI are builds too.
 
 **A release has a thread, and it is for what happened.** `release_notes` say what *changed*; the thread
 says how the rollout went — clean, a setting missed and added by hand, pulled back and why. It is the
 same shape as a task's and a goal's and rides on the release row as `jsonb` for the same reason: one
 atomic write per comment. `releases_add_comment` writes one, `comment` on `releases_update` writes one in
-the same call that marks the release, and neither moves the release's `updated`. An author is demanded,
+the same call that adds an environment, and neither moves the release's `updated`. An author is demanded,
 as on a goal: MCP has no session to take one from.
 
 **`git_hash` has to be a hash.** 7 to 64 hex characters, lower-cased on the way in; a branch or a tag is
@@ -428,9 +450,10 @@ the entry that cannot have moved since. `main` or `v1.2.3` stored here would be 
 precise and names nothing in particular.
 
 **A release names a microservice once.** Passing one it already has is a correction of that entry, in
-place: the version and the commit are replaced — stating them is what the call is for — and `datetime`,
-`settings_update_note` and `description` only when they are passed, so fixing a mistyped version does not
-wipe a note somebody wrote. An empty string is how a note is cleared on purpose.
+place: the version and the commit are replaced — stating them is what the call is for — and
+`release_link`, `datetime`, `settings_update_note` and `description` only when they are passed, so fixing
+a mistyped version does not wipe a note somebody wrote. An empty string is how a note, or the link, is
+cleared on purpose.
 
 **Its dates are statements, not stamps — and that is the one place a caller hands this service a
 time.** A release is written down after the fact, so `date` and each service's `datetime` are what
@@ -453,7 +476,8 @@ every release of the project while it carries only the live goals.
 mistake; it leaves every list and every goal that listed it, and stays reachable by its id. The goals keep
 the number in their lists and read past it, so `deleted: false` puts the release back on them as well —
 an undo that had to remember which goals to re-attach to would not be an undo. A release that was rolled
-back is **not** deleted: it happened, and what became of it goes in its `description`.
+back is **not** deleted: it happened, so it is taken off the environment it was pulled back from, and
+what became of it goes on its thread.
 
 **Recording a release with a `goal` writes two rows**, the release and then the goal that now lists it,
 with no transaction around them. The order is the safe one: a crash between the two leaves a release
@@ -461,13 +485,29 @@ nobody has attached yet, which is a legitimate state and visible on the Releases
 would leave a goal pointing at a number that names nothing.
 
 In the browser there is a **Releases** tab: one row per release, newest first, folded to its id, title,
-the id of the goal it shipped (in that goal's colour), a green `Prod` badge once it is on production, a
-settings flag when one is due, up to three `service version` chips, a count of the notes on its thread,
-and the date; a click opens the goal's name, the services table, the notes and the thread. Two filters
-narrow the list — to one microservice, and to what is or is not on production — and together they put
-the version of a service that is live at the top. A goal's dialog shows the releases it went out in under
-its text, open, and a goal that has shipped carries a `🚀` count on the Goals screen. All of it read-only
-— a release is recorded, marked and commented through `/mcp`.
+the id of the goal it shipped (in that goal's colour), a chip per environment it is out on — production's
+filled green, the rest outlined — a settings flag when one is due, up to three `service version` chips, a
+count of the notes on its thread, and the date; a click opens the goal's name, the services table, the
+notes and the thread. Two filters narrow the list — to one microservice, and to what is or is not on an
+environment — and together they put the version of a service that is live at the top. A goal's dialog
+shows the releases it went out in under its text, open, and a goal that has shipped carries a `🚀` count
+on the Goals screen. All of it read-only — a release is recorded, labelled and commented through `/mcp`.
+
+**The goal a release shipped can be opened from the release.** The chip carries the eye a goal's own row
+has, and it opens the same dialog. A release holds its goal by id, name and colour only, so the rest
+comes from the board: from the push the screen is already drawn from when the goal is on it, and from the
+server — archive included — when it is not, which is the ordinary state of a goal whose release is a
+month old. A release is exactly the thing that outlives its goal.
+
+**A release has an address: `/release/{project}/{release}`.** The Releases tab remembers its board rather
+than naming it in the url, so there was nothing to paste into a chat that would land somebody on *this
+one*. The page at that address is one release drawn with the pieces the list and a goal's dialog use,
+read cold by its two halves — the board's prefix, then the release's id (`RMS-R12`) or its bare number —
+through `POST /api/releases/v1/get`. Every row on the Releases tab, and every release under a goal, ends
+in a `↗` that opens it in a new tab; the address in that tab's bar is the link to share, and the tab is
+named after the release. A link to a release that has since been deleted still opens it, and says so:
+"no such release" would read like a typo. The page is live like every other screen, and it sets the
+board the tabs remember, so going from a release to Releases lands on that release's project.
 
 ## Searching the board
 
@@ -1181,8 +1221,10 @@ is not worth losing it over.
 A release is renumbered the same way and out of the same reservation, since the receiving board serves
 tasks, goals and releases from one counter exactly as the source did — and a goal's `releases: [TM-R12]` is
 remapped onto the new numbers. Its thread is in `comments.yaml` with every other, named by its handle, and
-its production mark crosses as the moment it was: a release that went live in March does not arrive
-saying it did so on the day of the import. A **deleted** release is carried too, still listed by its goals: a goal goes
+the environments it is out on cross as the labels they were, in the order it reached them and spelled as
+the source board spelled them — an import carries a board across, it does not merge two vocabularies. An
+archive exported by 0.2.0 has no labels and may say `released_on_prod` instead; that arrives as the label
+`Prod`. A **deleted** release is carried too, still listed by its goals: a goal goes
 on listing a release that has been deleted so that bringing it back puts it on the goal again, and that only
 holds on the other board if the release is there to bring back.
 
@@ -1503,9 +1545,11 @@ Tools:
   which version of which microservice. `releases_create` takes the `goal` the release ships and attaches
   it in the same call; a release recorded without one is attached later with `add_releases` on
   `goals_update`, which is also where one is detached — the goal lists its releases, so the link is the
-  goal's to change. `releases_list` filters by `goal`, by `microservice_id` and by `released_on_prod`,
-  newest first, and is capped by `limit` because nothing ages off it. `released_on_prod` on
-  `releases_update` is how a release is marked as out on production — a mark, not a second release. See
+  goal's to change. `releases_list` filters by `goal`, by `microservice_id`, and by `env` / `not_on_env`
+  for what is and is not out on an environment, newest first; it is capped by `limit` because nothing
+  ages off it, and reports the environment labels the project uses. `envs` on `releases_create` and
+  `add_envs` / `remove_envs` on `releases_update` say where a release is out — a label on it, not a
+  second release — and each service takes a `release_link` to the build that produced it. See
   [Releases](#releases--the-record-of-what-went-out).
 - `releases_add_comment` / `releases_get_comments` — the release's thread: how the rollout went, as
   opposed to its notes, which say what changed.

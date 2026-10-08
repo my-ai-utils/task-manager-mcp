@@ -305,9 +305,10 @@ draw from, so `RMS-12`, `RMS-G12` and `RMS-R12` are never more than one real thi
 releases_create when work ships. ONE release is one feature across however many microservices it \
 touched: the release carries what changed — `title`, `description`, `release_notes` and the `date` it \
 went out — and `services` carries one entry per microservice: its `microservice_id`, the `version` that \
-went out, the `git_hash` that version was built from, and `datetime`. A build link on a task says a \
-change was built; a release says what is OUT, and it is the first thing to read when somebody asks \
-which version of a service is deployed.\
+went out, the `git_hash` that version was built from, and `datetime` — and, when CI built it, a \
+`release_link` to the GitHub release or the workflow run that produced the image. A build link on a \
+task says a change was built; a release says what is OUT, and it is the first thing to read when \
+somebody asks which version of a service is deployed.\
 \
 A GOAL LISTS THE RELEASES IT WENT OUT IN. The goal is the description of the feature and the release is \
 the record of it shipping, so pass `goal` to releases_create and the two are joined in that same call; \
@@ -323,21 +324,25 @@ before deploying a recorded version anywhere, and write it in the same call that
 A release names a microservice ONCE: passing one it already has to releases_update corrects that entry \
 rather than adding a second.\
 \
-REACHING PRODUCTION IS A MARK ON A RELEASE, NOT A SECOND RELEASE. A release is recorded when it ships \
-somewhere — usually a test stand first — so the list of releases is everything that went out, not \
-everything that is live. When the same versions are rolled out to production, mark the release with \
-`released_on_prod: true` on releases_update; do not record them again. Every release reports \
-`released_on_prod`, and releases_list filters by it — which, together with `microservice_id`, is how \
-'which version of this service is on prod' is answered in one row. Mark it when it has HAPPENED, and take \
-the mark off with `false` if the release is pulled back from production.\
+WHERE A RELEASE IS OUT IS A LIST OF LABELS ON IT, NOT A SECOND RELEASE. A release is recorded when it \
+ships somewhere — usually a test stand first — so the list of releases is everything that went out, not \
+everything that is live. Each release carries `envs`: the environments it is on, as one-word labels like \
+`Dev` and `Prod`, in the order it reached them. Say where it is as you record it with `envs` on \
+releases_create, and when the same versions are rolled out further add the label with `add_envs` on \
+releases_update; do not record them again. releases_list filters by `env` — which, together with \
+`microservice_id`, is how 'which version of this service is on prod' is answered in one row — and by \
+`not_on_env` for what has not got there yet. Which environments exist is the project's own business: \
+releases_list reports the labels a project uses in its own `envs`, and those are the spellings to \
+reuse. Add a label when the rollout has HAPPENED, and take it off with `remove_envs` if the release is \
+pulled back from there.\
 \
 A RELEASE HAS A THREAD, AND IT IS FOR WHAT HAPPENED. `release_notes` say what changed; \
 releases_add_comment is where the rollout itself is written down — it went clean, a setting was missed \
 and added by hand, it was pulled back and why. `comment` on releases_update does the same in the call \
-that marks it. A comment does not move the release's `updated`.\
+that adds the environment. A comment does not move the release's `updated`.\
 \
-A RELEASE IS NOT DELETED FOR BEING ROLLED BACK. It happened; take the production mark off if it had \
-one, and say what became of it on its thread. releases_delete is for one recorded by mistake, and like \
+A RELEASE IS NOT DELETED FOR BEING ROLLED BACK. It happened; take it off the environment it was pulled \
+back from, and say what became of it on its thread. releases_delete is for one recorded by mistake, and like \
 every deletion here it is a flag — `deleted: false` on releases_update brings it back, onto the goals \
 that listed it too.\
 \
@@ -535,17 +540,22 @@ mod tests {
             .await
             .build();
 
-        for (schema, list) in [(create, "services"), (update, "add_services")] {
+        // Where a release is out is said on both tools, under different names: the first states the
+        // environments it starts on, the second adds to them and takes away.
+        for (schema, list, envs) in [
+            (create, "services", "envs"),
+            (update, "add_services", "add_envs"),
+        ] {
             for expected in [
                 list,
                 // From the nested item itself, which is the half a flat-only schema would lose.
                 "microservice_id",
                 "version",
                 "git_hash",
+                "release_link",
                 "datetime",
                 "settings_update_note",
-                // The production mark is on both tools: almost never on the first, usually on the second.
-                "released_on_prod",
+                envs,
             ] {
                 assert!(
                     schema.contains(expected),
@@ -591,7 +601,10 @@ mod tests {
                 // From the innermost object, which is the one a shallower schema would lose.
                 "microservice_id",
                 "git_hash",
+                "release_link",
                 "settings_update_note",
+                // And the one list on a release that is of plain strings.
+                "envs",
             ] {
                 assert!(
                     schema.contains(expected),
