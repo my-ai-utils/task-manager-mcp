@@ -69,10 +69,11 @@ forwards. Test it by opening `https://task-manager.jetdev.eu/authorized` directl
 means the image was built without `wwwroot/`, and the whole sign-in breaks without it. Same for
 `/projects-setup`, `/users`, `/settings`.
 
-**The WebSocket.** Open Home and look at the dot next to the project dropdown: green means the socket is
-up, grey means it is not. my-reverse-proxy does handle the upgrade (it uses `hyper_tungstenite` and has an
-explicit `WebSocketUpgrade` path), so this should work — the dot is there precisely so a failure is visible
-instead of the board silently going stale.
+**The live updates.** Open Home, then change a task from somewhere else — an agent, or a second tab
+dragging a card. The first tab has to follow without a reload. my-reverse-proxy does handle the upgrade
+the board's socket needs (it uses `hyper_tungstenite` and has an explicit `WebSocketUpgrade` path), so this
+should work; if it does not, the board still loads and simply stops following changes, which is why it is
+worth checking once rather than finding out later.
 
 **`/mcp` is exposed to the internet.** In this version it has no authorization at all — see `TODO.md`. If
 that is not acceptable yet, either drop the `/mcp` location from this config and reach it over the host
