@@ -16,6 +16,9 @@ pub struct ComponentState {
     /// The last push this page has acted on, by the app's own count of them — see
     /// [`Self::board_changed`].
     pub seen_revision: u64,
+    /// The board this browser was last on, as storage held it when the page was created — see
+    /// [`Self::release_loaded`].
+    remembered_board: Option<String>,
 }
 
 impl ComponentState {
@@ -25,7 +28,24 @@ impl ComponentState {
             release_ref,
             release: DataState::new(),
             seen_revision: 0,
+            // The one read of storage this page makes, and it is made here.
+            remembered_board: crate::web::storage::get_last_project(),
         }
+    }
+
+    /// The read came back. The release goes on screen, and its board becomes the board every screen
+    /// opens on — so the tabs above land on the project this release belongs to rather than on
+    /// whichever one this browser was on last.
+    ///
+    /// Written here, by the method that learns which board it is, and only when it is not the one
+    /// already remembered: a link opened on the board somebody is already on writes nothing.
+    pub fn release_loaded(&mut self, release: ReleaseResponse) {
+        if self.remembered_board.as_deref() != Some(release.project.as_str()) {
+            crate::web::storage::save_last_project(&release.project);
+            self.remembered_board = Some(release.project.clone());
+        }
+
+        self.release.set_loaded(release);
     }
 
     /// Whether this is the address the page is already on. Asked BEFORE [`Self::open`], through a peek:
@@ -167,6 +187,26 @@ mod tests {
             route.to_string(),
             task_manager_shared::releases::release_page_path(&release)
         );
+    }
+
+    /// Following a link to a release moves the browser to that release's board, the way opening the
+    /// board itself would — and a link into the board it is already on is not a write.
+    #[test]
+    fn a_release_that_was_read_becomes_the_board_the_tabs_open_on() {
+        crate::web::storage::save_last_project("TM");
+
+        let mut state = ComponentState::new("RMS".to_string(), "12".to_string());
+        state.release_loaded(release("RMS-R12", "Releases"));
+
+        assert_eq!(shown(&state).unwrap().id, "RMS-R12");
+        assert_eq!(crate::web::storage::get_last_project().as_deref(), Some("RMS"));
+
+        let before = crate::web::storage::storage_writes();
+
+        let mut again = ComponentState::new("RMS".to_string(), "13".to_string());
+        again.release_loaded(release("RMS-R13", "More"));
+
+        assert_eq!(crate::web::storage::storage_writes(), before);
     }
 
     /// A link to another release, followed from this page, changes the address without building a new

@@ -1,11 +1,5 @@
 const SESSION_TOKEN_KEY: &str = "task_manager_session_token";
 
-/// `pub(super)` so the remembered board beside this reads the same handle rather than opening its own — see
-/// [`super::save_last_project`]. Not `pub`: `storage` is the module that owns knowing where things are kept.
-pub(super) fn get_local_storage() -> Option<web_sys::Storage> {
-    web_sys::window()?.local_storage().ok()?
-}
-
 /// Forget a session token this browser stored before sessions moved into a cookie.
 ///
 /// **The only thing left of the old scheme, and it exists to finish removing it.** The session is now an
@@ -17,9 +11,7 @@ pub(super) fn get_local_storage() -> Option<web_sys::Storage> {
 /// build left behind, so a stale token does not sit in local storage for a year after it stopped meaning
 /// anything.
 pub fn clear_session_token() {
-    if let Some(storage) = get_local_storage() {
-        let _ = storage.remove_item(SESSION_TOKEN_KEY);
-    }
+    super::local_storage::delete(SESSION_TOKEN_KEY);
 }
 
 /// Which folders of a project's document tree were left open.
@@ -32,14 +24,7 @@ pub fn clear_session_token() {
 /// because a document path cannot contain a newline: it is normalised server-side into slash-separated
 /// segments with the whitespace trimmed.
 pub fn get_expanded_folders(project: &str) -> std::collections::HashSet<String> {
-    let Some(storage) = get_local_storage() else {
-        return Default::default();
-    };
-
-    storage
-        .get_item(&expanded_key(project))
-        .ok()
-        .flatten()
+    super::local_storage::get(&expanded_key(project))
         .map(|raw| {
             raw.split('\n')
                 .filter(|itm| !itm.is_empty())
@@ -50,10 +35,8 @@ pub fn get_expanded_folders(project: &str) -> std::collections::HashSet<String> 
 }
 
 pub fn set_expanded_folders(project: &str, folders: &std::collections::HashSet<String>) {
-    if let Some(storage) = get_local_storage() {
-        let joined: Vec<&str> = folders.iter().map(|itm| itm.as_str()).collect();
-        let _ = storage.set_item(&expanded_key(project), &joined.join("\n"));
-    }
+    let joined: Vec<&str> = folders.iter().map(|itm| itm.as_str()).collect();
+    super::local_storage::set(&expanded_key(project), &joined.join("\n"));
 }
 
 fn expanded_key(project: &str) -> String {

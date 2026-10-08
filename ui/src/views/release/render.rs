@@ -54,9 +54,8 @@ pub fn RenderReleasePage(project: String, release: String) -> Element {
         }
     });
 
-    // The board is remembered where the other screens remember it — so the tabs above land on the board
-    // this release belongs to rather than on whichever one this browser was on last — and watched, or the
-    // page would have no channel for the pushes it is kept current by.
+    // Watched, or the page would have no channel for the pushes it is kept current by. Remembering the
+    // board is not done here: the state does that when the release arrives — see `release_loaded`.
     use_effect(move || {
         let prefix = cs
             .read()
@@ -65,7 +64,6 @@ pub fn RenderReleasePage(project: String, release: String) -> Element {
             .map(|itm| itm.project.clone());
 
         if let Some(prefix) = prefix {
-            crate::web::storage::save_last_project(&prefix);
             crate::web::watch_project(&prefix);
         }
     });
@@ -168,7 +166,7 @@ fn get_release(
 
                 match crate::api::get_release(&project, &release).await {
                     Ok(response) => {
-                        cs.write().release.set_loaded(response);
+                        cs.write().release_loaded(response);
 
                         // Started by THIS page too: somebody who lands here from a link is on no other
                         // screen, and would otherwise have no channel for changes at all. Idempotent.

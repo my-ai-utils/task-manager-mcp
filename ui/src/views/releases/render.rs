@@ -7,7 +7,7 @@ use crate::states::AppState;
 
 use super::{
     ComponentState, DONE, IN_PROGRESS, NOT_ON_ENV, ON_ENV, envs_to_offer, filter_asks,
-    includes_service, matches_done_filter, matches_env_filter, microservices_of,
+    includes_service, matches_done_filter, matches_env_filter, services_to_offer,
 };
 
 /// What has gone out, newest first.
@@ -22,7 +22,11 @@ use super::{
 pub fn RenderReleases() -> Element {
     let app_state = consume_context::<Signal<AppState>>();
 
-    let mut cs = use_signal(ComponentState::default);
+    // Created from what this browser kept of the screen — the board it was on and the three filters —
+    // so the first thing drawn is the screen as it was left. That is the only read of storage here:
+    // nothing below, in the render body or in an effect, asks it anything, and it is written by the
+    // state methods that change what is stored. See `ComponentState::new`.
+    let mut cs = use_signal(ComponentState::new);
 
     // A push carries every release of the project, so once the screen is up it is served from the socket
     // alone: a release an agent has just recorded appears without anybody re-reading anything, and an
@@ -43,13 +47,13 @@ pub fn RenderReleases() -> Element {
         }
     });
 
-    // Remembered where Home and Goals remember it, so the three tabs stay on one board — and watched, or
-    // this screen would have no channel for the pushes it is drawn from.
+    // Watched, or this screen would have no channel for the pushes it is drawn from. Only that: which
+    // board is remembered is written by the state when a board is chosen, not from here — an effect
+    // would pay for a storage write on every change of anything in the state.
     use_effect(move || {
         let prefix = cs.read().selected.clone();
 
         if !prefix.is_empty() {
-            crate::web::storage::save_last_project(&prefix);
             crate::web::watch_project(&prefix);
         }
     });
@@ -79,10 +83,13 @@ pub fn RenderReleases() -> Element {
     // filtered by, which stays in its control whatever the board holds.
     let (services, envs) = match &releases {
         Ok(releases) => (
-            microservices_of(releases),
+            services_to_offer(releases, cs_ra.service_filter.as_str()),
             envs_to_offer(releases, cs_ra.env_filter.as_str()),
         ),
-        Err(_) => (Vec::new(), envs_to_offer(&[], cs_ra.env_filter.as_str())),
+        Err(_) => (
+            services_to_offer(&[], cs_ra.service_filter.as_str()),
+            envs_to_offer(&[], cs_ra.env_filter.as_str()),
+        ),
     };
 
     let header = rsx! {
@@ -165,32 +172,9 @@ fn get_projects(
 
                 match crate::api::get_projects().await {
                     Ok(response) => {
-                        // The same choice Home and Goals make, for the same reasons: the board this
-                        // browser was last on when it is still one the reader can see, else the first
-                        // live one, else whatever there is.
-                        let remembered = crate::web::storage::get_last_project();
-
-                        let initial = remembered
-                            .filter(|prefix| {
-                                response
-                                    .projects
-                                    .iter()
-                                    .any(|itm| itm.prefix.eq_ignore_ascii_case(prefix))
-                            })
-                            .or_else(|| {
-                                response
-                                    .projects
-                                    .iter()
-                                    .find(|itm| !itm.archived)
-                                    .or_else(|| response.projects.first())
-                                    .map(|itm| itm.prefix.clone())
-                            })
-                            .unwrap_or_default();
-
-                        let mut cs_wa = cs.write();
-                        cs_wa.selected = initial;
-                        cs_wa.projects.set_loaded(response.projects);
-                        drop(cs_wa);
+                        // The board is chosen by the state, from what it read of storage when it was
+                        // created — the one this browser was last on, when the reader can still see it.
+                        cs.write().projects_loaded(response.projects);
 
                         // Started by THIS screen too: somebody who opens /releases directly would
                         // otherwise have no channel for changes at all. Idempotent.

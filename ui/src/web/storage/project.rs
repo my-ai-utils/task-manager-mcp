@@ -19,9 +19,7 @@ const LAST_PROJECT_KEY: &str = "task_manager_project";
 /// project it names, so hand-editing this value opens nothing its owner could not already open. That is what
 /// makes it safe for the client to write.
 pub fn save_last_project(prefix: &str) {
-    if let Some(storage) = super::get_local_storage() {
-        let _ = storage.set_item(LAST_PROJECT_KEY, prefix);
-    }
+    super::local_storage::set(LAST_PROJECT_KEY, prefix);
 }
 
 /// The remembered prefix, or `None` when this browser has not settled on a board yet.
@@ -29,10 +27,7 @@ pub fn save_last_project(prefix: &str) {
 /// An empty string reads as `None`: a value written before a prefix was known would otherwise be a board no
 /// project can match, which is a slower way of saying nothing.
 pub fn get_last_project() -> Option<String> {
-    super::get_local_storage()?
-        .get_item(LAST_PROJECT_KEY)
-        .ok()
-        .flatten()
+    super::local_storage::get(LAST_PROJECT_KEY)
         .map(|itm| itm.trim().to_string())
         .filter(|itm| !itm.is_empty())
 }

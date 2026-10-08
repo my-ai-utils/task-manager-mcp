@@ -177,7 +177,7 @@ separately, under Settings.
 |---|---|
 | **Home** | The board of one project: columns of cards, most urgent first. Filters by task type, assignee and goal, and a search box. A card is dragged to another column; a double-click opens it with its text, checklist, documents, builds and thread. |
 | **Goals** | Every goal with its progress, priority and status — Todo, In Progress or Done — and its tasks folded underneath. The eye opens the goal: its text, and tabs for its comments and for the releases it went out in. This is also where a goal's colour is picked. |
-| **Releases** | What has gone out, newest first. Each row shows the goal it shipped, the environments it is on, whether it is done, a flag when a service needs its settings changed, and the versions. Filters by microservice, by environment and by state. |
+| **Releases** | What has gone out, newest first. Each row shows the goal it shipped, the environments it is on, whether it is done, a flag when a service needs its settings changed, and the versions. Filters by microservice, by environment and by state: it opens on what is still in progress, and the browser remembers the filters it was left with. |
 | **Documents** | The project's documents and its connected repositories as one tree, with a viewer beside it. |
 | **Projects setup** | Admins only. Every project, with **Edit** (name, description, prefix, templates, archive window), **Members**, **GitHub**, **Export**, **Import** and **Archive**. |
 | **Users** | Admins only. The roster. |

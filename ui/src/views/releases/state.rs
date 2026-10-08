@@ -1,4 +1,5 @@
 use dioxus_utils::DataState;
+use serde::{Deserialize, Serialize};
 use task_manager_shared::projects::ProjectResponse;
 use task_manager_shared::releases::{ReleaseResponse, is_done, is_on_env, same_env};
 
@@ -19,10 +20,56 @@ pub const NOT_ON_ENV: &str = "not:";
 pub const IN_PROGRESS: &str = "open";
 pub const DONE: &str = "done";
 
-#[derive(Default)]
+/// How the Releases screen was left — what this browser keeps of it, in `localStorage`.
+///
+/// **The screen is not drawn from this; its state is CREATED from it.** [`ComponentState::new`] reads the
+/// record once, so the first thing drawn is already the screen the reader left, and from then on the
+/// state is the only thing anything looks at. The other direction is [`ComponentState::persist`], called
+/// by every method that changes one of these fields — the state and storage move together, and nothing
+/// else writes.
+///
+/// `localStorage` rather than `sessionStorage`, because these are preferences and not a place in a
+/// visit: "show me what is still in progress" is how somebody wants releases shown tomorrow too, in
+/// whatever tab they open.
+///
+/// Every field has a default, so a record written by an older build still loads — and the default for
+/// `done_filter` is not empty: a browser that has never been here opens on what is still in progress.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReleasesRecord {
+    /// The board the record was written on. It qualifies `service_filter` and nothing else: a service is
+    /// a service of ONE board, so the filter is honoured only when the screen opens on this board again.
+    /// Which board that is, is not decided here — it is the one every screen remembers together.
+    #[serde(default)]
+    pub board: String,
+    #[serde(default)]
+    pub service_filter: String,
+    #[serde(default)]
+    pub env_filter: String,
+    #[serde(default = "in_progress")]
+    pub done_filter: String,
+}
+
+fn in_progress() -> String {
+    IN_PROGRESS.to_string()
+}
+
+impl Default for ReleasesRecord {
+    /// A first visit: any service, any environment, and what is still in progress.
+    fn default() -> Self {
+        Self {
+            board: String::new(),
+            service_filter: String::new(),
+            env_filter: String::new(),
+            done_filter: in_progress(),
+        }
+    }
+}
+
 pub struct ComponentState {
     pub projects: DataState<Vec<ProjectResponse>>,
     /// Which board is on screen, by PREFIX — the same vocabulary Home and Goals hold and the api speaks.
+    /// Empty until the projects have arrived: a remembered board is a wish until the list says the
+    /// reader may still see it.
     pub selected: String,
     pub releases: DataState<Vec<ReleaseResponse>>,
     /// Which releases are open, by id. Kept across a repaint, so a push does not fold up what somebody
@@ -40,9 +87,61 @@ pub struct ComponentState {
     /// empty for both. Not reset by `select` either, and for the same reason: "what still has somewhere
     /// to go" is asked of one board after another.
     pub done_filter: String,
+    /// The board the stored filters were written on — see [`ReleasesRecord::board`]. Read when the
+    /// projects arrive, to decide whether the remembered service still means anything.
+    filters_board: String,
+    /// The board this browser was last on, as storage holds it. Shared by every screen — it is what
+    /// keeps the tabs on one board — and kept here so that choosing the board already remembered is not
+    /// a write.
+    remembered_board: Option<String>,
+    /// What storage holds of this screen right now. It is what lets [`Self::persist`] be called by every
+    /// method that MAY have changed the record and still write only when one did.
+    stored: Option<ReleasesRecord>,
 }
 
 impl ComponentState {
+    /// The state as this browser left it.
+    ///
+    /// **The one read of storage this screen makes.** Not in the render body and not in an effect: a
+    /// state created empty and filled in afterwards draws a wrong first frame and then corrects it, and
+    /// a screen drawn from storage directly has two sources that can disagree.
+    pub fn new() -> Self {
+        let stored = crate::web::storage::releases::get();
+        let record = stored.clone().unwrap_or_default();
+
+        Self {
+            projects: DataState::new(),
+            selected: String::new(),
+            releases: DataState::new(),
+            expanded: Vec::new(),
+            service_filter: record.service_filter,
+            env_filter: record.env_filter,
+            done_filter: record.done_filter,
+            filters_board: record.board,
+            remembered_board: crate::web::storage::get_last_project(),
+            stored,
+        }
+    }
+
+    /// The projects have arrived: now the board can be chosen, and the stored filters checked against
+    /// it.
+    pub fn projects_loaded(&mut self, projects: Vec<ProjectResponse>) {
+        self.selected = board_to_open(&projects, self.remembered_board.as_deref());
+
+        // A service is a service of one board. The remembered one is kept only when the screen is back
+        // on the board it was chosen on — the board may have been changed since from another screen,
+        // or have gone from this reader's list — and anywhere else it would empty the list for a
+        // reason nobody could see.
+        if self.filters_board != self.selected {
+            self.service_filter.clear();
+        }
+
+        self.projects.set_loaded(projects);
+
+        self.remember_board();
+        self.persist();
+    }
+
     pub fn select(&mut self, prefix: String) {
         if self.selected == prefix {
             return;
@@ -55,6 +154,9 @@ impl ComponentState {
         // Unlike the Goals screen's filters this one IS about one board: it names a service of the project
         // just left, and carried over it would empty the next one for a reason nobody could see.
         self.service_filter.clear();
+
+        self.remember_board();
+        self.persist();
     }
 
     pub fn toggle(&mut self, id: &str) {
@@ -67,14 +169,54 @@ impl ComponentState {
 
     pub fn set_service_filter(&mut self, microservice_id: String) {
         self.service_filter = microservice_id;
+        self.persist();
     }
 
     pub fn set_env_filter(&mut self, value: String) {
         self.env_filter = value;
+        self.persist();
     }
 
     pub fn set_done_filter(&mut self, value: String) {
         self.done_filter = value;
+        self.persist();
+    }
+
+    /// The ONE place this state becomes a record.
+    fn to_record(&self) -> ReleasesRecord {
+        ReleasesRecord {
+            board: self.selected.clone(),
+            service_filter: self.service_filter.clone(),
+            env_filter: self.env_filter.clone(),
+            done_filter: self.done_filter.clone(),
+        }
+    }
+
+    /// The only writer of the record, and it compares before it writes — so it is safe at the end of
+    /// every method that may have changed one of the stored fields, and choosing what is already chosen
+    /// is not a write.
+    fn persist(&mut self) {
+        let record = self.to_record();
+
+        if self.stored.as_ref() == Some(&record) {
+            return;
+        }
+
+        crate::web::storage::releases::set(&record);
+        self.stored = Some(record);
+    }
+
+    /// The board on screen becomes the board every screen opens on. Written here — by the methods that
+    /// choose a board — rather than by an effect watching the state, and only when it is not the one
+    /// storage already has.
+    fn remember_board(&mut self) {
+        if self.selected.is_empty() || self.remembered_board.as_deref() == Some(self.selected.as_str())
+        {
+            return;
+        }
+
+        crate::web::storage::save_last_project(&self.selected);
+        self.remembered_board = Some(self.selected.clone());
     }
 
     /// A push that carried the board: what it says replaces what is shown, with no request.
@@ -86,6 +228,41 @@ impl ComponentState {
     pub fn board_invalidated(&mut self) {
         self.releases.reset();
     }
+}
+
+/// Which board the screen opens on: the one this browser was last on when the reader can still see it,
+/// else the first live one, else whatever there is. The choice Home and Goals make, for the same reasons.
+///
+/// The remembered prefix is matched ignoring case and answered in the project's OWN spelling, so what
+/// the state holds is always exactly what the picker's options carry.
+pub fn board_to_open(projects: &[ProjectResponse], remembered: Option<&str>) -> String {
+    remembered
+        .and_then(|prefix| {
+            projects
+                .iter()
+                .find(|itm| itm.prefix.eq_ignore_ascii_case(prefix))
+        })
+        .or_else(|| projects.iter().find(|itm| !itm.archived))
+        .or_else(|| projects.first())
+        .map(|itm| itm.prefix.clone())
+        .unwrap_or_default()
+}
+
+/// The services the filter offers: the ones this board's releases name, and the one being filtered by
+/// even when none of them does.
+///
+/// The second half matters now that the choice outlives a visit: the service somebody filtered by last
+/// week may be in no release today. Left out of the control, that would be an empty list under a box
+/// saying "Any service".
+pub fn services_to_offer(releases: &[ReleaseResponse], filter: &str) -> Vec<String> {
+    let mut result = microservices_of(releases);
+
+    if !filter.is_empty() && !result.iter().any(|itm| itm == filter) {
+        result.push(filter.to_string());
+        result.sort();
+    }
+
+    result
 }
 
 /// Every microservice the releases name, once each, sorted — what the filter offers.
@@ -236,6 +413,198 @@ mod tests {
         release
     }
 
+    fn project(prefix: &str, archived: bool) -> ProjectResponse {
+        ProjectResponse {
+            name: prefix.to_string(),
+            description: String::new(),
+            prefix: prefix.to_string(),
+            prefix_history: Vec::new(),
+            columns: Vec::new(),
+            column_template_id: None,
+            column_template_name: None,
+            kinds: Vec::new(),
+            kind_template_id: None,
+            kind_template_name: None,
+            members: Vec::new(),
+            tasks_amount: 0,
+            archive_days: None,
+            archived,
+        }
+    }
+
+    /// The screen as a browser opens it: created from whatever storage holds, then handed the boards.
+    fn opened(boards: &[&str]) -> ComponentState {
+        let mut state = ComponentState::new();
+        state.projects_loaded(boards.iter().map(|prefix| project(prefix, false)).collect());
+        state
+    }
+
+    fn stored() -> ReleasesRecord {
+        crate::web::storage::releases::get().expect("the screen should have written its record")
+    }
+
+    /// A browser that has never been here opens on what still has somewhere to go — the list this
+    /// screen is most often opened for — and not on the whole history.
+    #[test]
+    fn a_first_visit_shows_what_is_still_in_progress() {
+        let state = opened(&["RMS", "TM"]);
+
+        assert_eq!(state.selected, "RMS");
+        assert_eq!(state.done_filter, IN_PROGRESS);
+        assert!(state.env_filter.is_empty());
+        assert!(state.service_filter.is_empty());
+    }
+
+    /// The whole point: what somebody chose is what they find next time — the board, and all three
+    /// filters, including "Any state", which is a choice and must not be mistaken for no choice.
+    #[test]
+    fn the_screen_comes_back_the_way_it_was_left() {
+        let mut state = opened(&["RMS", "TM"]);
+
+        state.select("TM".to_string());
+        state.set_service_filter("margin-engine".to_string());
+        state.set_env_filter("on:Prod".to_string());
+        state.set_done_filter(DONE.to_string());
+
+        let back = opened(&["RMS", "TM"]);
+
+        assert_eq!(back.selected, "TM");
+        assert_eq!(back.service_filter, "margin-engine");
+        assert_eq!(back.env_filter, "on:Prod");
+        assert_eq!(back.done_filter, DONE);
+
+        let mut back = back;
+        back.set_done_filter(String::new());
+
+        assert_eq!(
+            opened(&["RMS", "TM"]).done_filter,
+            "",
+            "\"Any state\" was chosen, so it is what comes back — not the default"
+        );
+    }
+
+    /// Every change of a stored field is in storage by the time the method returns: the state and the
+    /// record move together, with no effect in between that could lag or be forgotten.
+    #[test]
+    fn a_change_is_written_by_the_method_that_makes_it() {
+        let mut state = opened(&["RMS", "TM"]);
+
+        state.set_env_filter("not:Prod".to_string());
+        assert_eq!(stored().env_filter, "not:Prod");
+
+        state.set_done_filter(DONE.to_string());
+        assert_eq!(stored().done_filter, DONE);
+
+        state.set_service_filter("rest-api".to_string());
+        assert_eq!(stored().service_filter, "rest-api");
+        assert_eq!(stored().board, "RMS", "and the record says which board that service is of");
+
+        state.select("TM".to_string());
+        assert_eq!(stored().board, "TM");
+        assert_eq!(stored().service_filter, "", "the service of the board just left is dropped");
+        assert_eq!(crate::web::storage::get_last_project().as_deref(), Some("TM"));
+    }
+
+    /// `persist` is called by every method that may have changed the record, so it has to be free when
+    /// none did — and what is only on screen for now, which rows are unfolded, is not stored at all.
+    #[test]
+    fn nothing_is_written_when_nothing_changed() {
+        let mut state = opened(&["RMS", "TM"]);
+        state.set_env_filter("on:Prod".to_string());
+
+        let before = crate::web::storage::storage_writes();
+
+        state.set_env_filter("on:Prod".to_string());
+        state.set_done_filter(IN_PROGRESS.to_string());
+        state.set_service_filter(String::new());
+        state.select("RMS".to_string());
+        state.toggle("RMS-R1");
+        state.board_pushed(Vec::new());
+
+        assert_eq!(crate::web::storage::storage_writes(), before);
+
+        // Opening the screen again on the board it was left on writes nothing either.
+        let _ = opened(&["RMS", "TM"]);
+        assert_eq!(crate::web::storage::storage_writes(), before);
+    }
+
+    /// A service is a service of one board. If the board was changed from another screen since, or is
+    /// no longer one this reader can see, the remembered service would hide every release behind a
+    /// choice the picker does not even list — so it is dropped, while the two filters that are about
+    /// the reader rather than the board stay.
+    #[test]
+    fn a_remembered_service_is_honoured_only_on_its_own_board() {
+        let mut state = opened(&["RMS", "TM"]);
+        state.set_service_filter("rest-api".to_string());
+        state.set_env_filter("on:Prod".to_string());
+
+        // Home, in the meantime, moved this browser to another board.
+        crate::web::storage::save_last_project("TM");
+
+        let elsewhere = opened(&["RMS", "TM"]);
+        assert_eq!(elsewhere.selected, "TM");
+        assert!(elsewhere.service_filter.is_empty());
+        assert_eq!(elsewhere.env_filter, "on:Prod");
+        assert_eq!(stored().board, "TM", "and the record no longer claims the old board");
+
+        // And a board that is gone from the list altogether.
+        let mut state = opened(&["RMS", "TM"]);
+        state.select("RMS".to_string());
+        state.set_service_filter("rest-api".to_string());
+
+        let without_it = opened(&["TM"]);
+        assert_eq!(without_it.selected, "TM");
+        assert!(without_it.service_filter.is_empty());
+    }
+
+    /// A record from a build that did not know a field still loads, and the state filter — the one whose
+    /// absence is NOT "any" — reads as its default. A value that is not a record at all is a first visit.
+    #[test]
+    fn an_older_or_unreadable_record_still_opens_the_screen() {
+        let older: ReleasesRecord = serde_json::from_str(r#"{"env_filter":"on:Prod"}"#).unwrap();
+
+        assert_eq!(older.env_filter, "on:Prod");
+        assert_eq!(older.done_filter, IN_PROGRESS);
+        assert!(older.board.is_empty());
+
+        let any: ReleasesRecord = serde_json::from_str(r#"{"done_filter":""}"#).unwrap();
+        assert_eq!(any.done_filter, "");
+
+        assert_eq!(ReleasesRecord::default().done_filter, IN_PROGRESS);
+    }
+
+    #[test]
+    fn the_board_opened_is_the_remembered_one_when_it_can_still_be_seen() {
+        let boards = [project("OLD", true), project("RMS", false), project("TM", false)];
+
+        assert_eq!(board_to_open(&boards, Some("TM")), "TM");
+        assert_eq!(board_to_open(&boards, Some("tm")), "TM", "in the project's own spelling");
+        assert_eq!(
+            board_to_open(&boards, Some("OLD")),
+            "OLD",
+            "an archived board reached before is still the one to open"
+        );
+        assert_eq!(board_to_open(&boards, Some("GONE")), "RMS", "else the first live one");
+        assert_eq!(board_to_open(&boards, None), "RMS");
+        assert_eq!(board_to_open(&[project("OLD", true)], None), "OLD", "else whatever there is");
+        assert_eq!(board_to_open(&[], Some("TM")), "");
+    }
+
+    /// The choice outlives the visit now, so the service filtered by may be in no release today — and it
+    /// must still be in the control, or the list is empty under a box saying "Any service".
+    #[test]
+    fn the_service_being_filtered_by_is_always_offered() {
+        let releases = [release("RMS-R1", &["rest-api", "ui"])];
+
+        assert_eq!(services_to_offer(&releases, ""), vec!["rest-api", "ui"]);
+        assert_eq!(services_to_offer(&releases, "ui"), vec!["rest-api", "ui"]);
+        assert_eq!(
+            services_to_offer(&releases, "bridge"),
+            vec!["bridge", "rest-api", "ui"]
+        );
+        assert_eq!(services_to_offer(&[], "bridge"), vec!["bridge"]);
+    }
+
     /// "What is live" and "what has not got there yet" are the two questions the labels exist for, and
     /// between them they are every release — nothing is on neither list.
     #[test]
@@ -356,12 +725,9 @@ mod tests {
     /// where it would hide every release behind a choice the picker no longer even lists.
     #[test]
     fn changing_board_drops_what_was_about_the_old_one() {
-        let mut state = ComponentState {
-            selected: "RMS".to_string(),
-            expanded: vec!["RMS-R1".to_string()],
-            service_filter: "rest-api".to_string(),
-            ..Default::default()
-        };
+        let mut state = opened(&["RMS", "TM"]);
+        state.toggle("RMS-R1");
+        state.set_service_filter("rest-api".to_string());
 
         // The same board is not a change, and nothing is thrown away for it.
         state.select("RMS".to_string());
@@ -387,7 +753,7 @@ mod tests {
 
     #[test]
     fn a_release_folds_and_unfolds_by_id() {
-        let mut state = ComponentState::default();
+        let mut state = ComponentState::new();
 
         state.toggle("RMS-R1");
         state.toggle("RMS-R2");

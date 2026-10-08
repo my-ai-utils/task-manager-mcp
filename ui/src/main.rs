@@ -80,6 +80,12 @@ pub enum AppRoute {
 }
 
 fn main() {
+    // First, before anything can go wrong: a release build of Dioxus installs no panic hook, so without
+    // this a panic leaves `RuntimeError: unreachable` in the console and nothing else. It matters more
+    // now that storage is asked through `LOCAL_STORAGE`, which panics — with its reason — when the
+    // browser will not give it one, instead of pretending nothing is stored.
+    dioxus_utils::set_panic_hook();
+
     // Before anything renders, and it is the whole of what the old scheme leaves behind: the board a browser
     // was on used to be a cookie, and a cookie nothing reads still rides on every request — including every
     // document's bytes — until it expires a year later. See `storage::save_last_project`.
