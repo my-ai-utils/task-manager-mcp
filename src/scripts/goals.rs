@@ -23,6 +23,9 @@ pub struct NewGoal {
     /// Documents to point at from the start, by id. A goal is where a decision gets written down, so this is
     /// the likelier of the two to open with one.
     pub documents: Vec<String>,
+    /// When work on it began, as the caller writes it — see [`parse_goal_moment`]. `None` opens it
+    /// unstarted, which is what a goal still being talked about is.
+    pub started_at: Option<String>,
 }
 
 /// A change to a goal. Every field is optional; `None` means "leave it alone".
@@ -39,6 +42,13 @@ pub struct GoalPatch {
     pub priority: Option<String>,
     /// `Some(true)` closes the goal, `Some(false)` re-opens it, `None` leaves its state alone.
     pub close: Option<bool>,
+    /// When work on the goal began — see [`parse_goal_moment`]. An empty string clears it: a start set by
+    /// mistake has to be undoable.
+    pub started_at: Option<String>,
+    /// When the goal was closed, for a close that happened earlier than the call recording it — see
+    /// [`parse_goal_moment`]. Dates the close this call makes, or re-dates the one already made; on a goal
+    /// that is neither, it is refused.
+    pub closed_at: Option<String>,
     /// `Some(false)` brings a deleted goal back. `Some(true)` deletes it, which `delete_goal` also does —
     /// both are here because undoing has to live somewhere, and a delete tool that also undeletes reads as a
     /// trick question.
@@ -65,6 +75,8 @@ impl GoalPatch {
             && self.color.is_none()
             && self.priority.is_none()
             && self.close.is_none()
+            && self.started_at.is_none()
+            && self.closed_at.is_none()
             && self.deleted.is_none()
             && self.subtasks.is_empty()
             && self.documents.is_empty()
@@ -167,14 +179,20 @@ pub async fn create_goal(app: &AppContext, new_goal: NewGoal) -> Result<String, 
     .apply(app, &project.id, &mut documents, "this goal")
     .await?;
 
+    let now = DateTimeAsMicroseconds::now();
+
+    // With the rest of the validation, before the number is reserved.
+    let start_moment = match new_goal.started_at.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(started) => Some(parse_goal_moment(started, "started_at", now)?),
+    };
+
     let number = app.board.reserve_task_number(&project.id).ok_or_else(|| {
         format!(
             "project {} vanished while creating the goal",
             project.prefix
         )
     })?;
-
-    let now = DateTimeAsMicroseconds::now();
 
     let goal = GoalModel {
         project_id: project.id.clone(),
@@ -190,6 +208,7 @@ pub async fn create_goal(app: &AppContext, new_goal: NewGoal) -> Result<String, 
         comments: Vec::new(),
         created: now,
         updated: now,
+        start_moment,
         // Nothing is created closed. A goal closes only once its tasks are done, and it has none yet.
         close_moment: None,
         deleted_moment: None,
@@ -226,7 +245,7 @@ pub async fn update_goal(
 ) -> Result<String, String> {
     if patch.is_empty() {
         return Err(
-            "nothing to update: pass at least one of name, description, color, priority, close, a checklist change, a document reference, a release or comment"
+            "nothing to update: pass at least one of name, description, color, priority, close, started_at, closed_at, a checklist change, a document reference, a release or comment"
                 .to_string(),
         );
     }
@@ -303,18 +322,14 @@ pub async fn update_goal(
         goal.comments.push(comment);
     }
 
-    // Stamped on the way in and cleared on the way out, so a re-opened goal carries no close date and a
-    // re-closed one is dated by its latest close. Without the clearing, an open goal with an old moment
-    // would count as archived and quietly leave the screen.
-    match patch.close {
-        Some(true) => {
-            if !was_closed {
-                goal.close_moment = Some(DateTimeAsMicroseconds::now());
-            }
-        }
-        Some(false) => goal.close_moment = None,
-        None => {}
-    }
+    apply_moments(
+        &mut goal,
+        &patch,
+        was_closed,
+        DateTimeAsMicroseconds::now(),
+        &handle,
+        |goal| first_start_of_work(&board, goal),
+    )?;
 
     // Stamped once and cleared whole: deleting twice must not rewrite when it happened, and restoring has to
     // leave no trace of the flag or the goal would read as deleted for ever.
@@ -415,6 +430,117 @@ pub async fn add_goal_comment(
     Ok(handle)
 }
 
+/// The two ends of a goal, as one patch moves them: `started_at`, the close, and `closed_at`. Pure, so the
+/// rules are tested without a board — `first_start` is asked only when a closed goal turns out to have no
+/// start.
+///
+/// * `started_at` sets the start — `now`, a date, a date and time — and an empty string clears it.
+/// * Closing stamps the end: `closed_at` if given, now if not. Re-opening clears it.
+/// * `closed_at` dates the close this patch makes, or re-dates one already made — and on a goal that is
+///   neither it is refused, because there is no close to date.
+/// * A closed goal always has a start: one nobody gave is `first_start`'s answer.
+/// * A goal never starts after it closed.
+fn apply_moments(
+    goal: &mut GoalModel,
+    patch: &GoalPatch,
+    was_closed: bool,
+    now: DateTimeAsMicroseconds,
+    handle: &str,
+    first_start: impl FnOnce(&GoalModel) -> DateTimeAsMicroseconds,
+) -> Result<(), String> {
+    if let Some(started) = &patch.started_at {
+        goal.start_moment = match started.trim() {
+            "" => None,
+            started => Some(parse_goal_moment(started, "started_at", now)?),
+        };
+    }
+
+    let closed_at = match &patch.closed_at {
+        None => None,
+        Some(closed_at) => Some(parse_goal_moment(closed_at, "closed_at", now)?),
+    };
+
+    // Stamped on the way in and cleared on the way out, so a re-opened goal carries no close date and a
+    // re-closed one is dated by its latest close. Without the clearing, an open goal with an old moment
+    // would count as archived and quietly leave the screen.
+    match (patch.close, closed_at) {
+        (Some(true), closed_at) if !was_closed => {
+            goal.close_moment = Some(closed_at.unwrap_or(now))
+        }
+        (Some(true) | None, Some(closed_at)) if was_closed => goal.close_moment = Some(closed_at),
+        (Some(true), None) | (None, None) => {}
+        (Some(false), None) => goal.close_moment = None,
+        (_, Some(_)) => {
+            return Err(format!(
+                "{handle} is not closed, so there is no close to date — pass `closed_at` with `close: true`, or on a goal that is already closed"
+            ));
+        }
+    }
+
+    // A goal is never closed without a start: its span on the timeline needs both ends.
+    if goal.close_moment.is_some() && goal.start_moment.is_none() {
+        goal.start_moment = Some(first_start(goal));
+    }
+
+    if let (Some(started), Some(closed)) = (goal.start_moment, goal.close_moment) {
+        if started.unix_microseconds > closed.unix_microseconds {
+            return Err(format!(
+                "{handle} would start after it closed: started {} is later than closed {}",
+                started.to_rfc3339_utc(),
+                closed.to_rfc3339_utc()
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// A moment a caller gives for a goal — when it started, or when it closed: `now`, a date, or a date and
+/// time (see `parse_caller_moment`). Not in the future: both are records of what happened, not a plan.
+pub fn parse_goal_moment(
+    src: &str,
+    what: &str,
+    now: DateTimeAsMicroseconds,
+) -> Result<DateTimeAsMicroseconds, String> {
+    let src = src.trim();
+
+    if src.eq_ignore_ascii_case("now") {
+        return Ok(now);
+    }
+
+    let moment = super::parse_caller_moment(src, what)?;
+
+    // A minute of slack for a caller whose clock runs ahead of this one.
+    if moment.unix_microseconds > now.unix_microseconds + 60 * 1_000_000 {
+        return Err(format!(
+            "{what} '{src}' is in the future — it records when something happened, so pass `now` or a moment that has passed"
+        ));
+    }
+
+    Ok(moment)
+}
+
+/// When work on a goal began, as far as its tasks can tell: the earliest moment one of them left Todo. A
+/// task that left it before starts were recorded counts from when it was created; a task still in Todo has
+/// not begun anything. With nothing to go on, the goal's own opening.
+fn first_start_of_work(
+    board: &crate::board::BoardInner,
+    goal: &GoalModel,
+) -> DateTimeAsMicroseconds {
+    board
+        .tasks_of_goal(&goal.project_id, goal.number)
+        .iter()
+        .filter_map(|task| match task.start_moment {
+            Some(started) => Some(started),
+            None if task.status != task_manager_shared::projects::COLUMN_ID_TODO => {
+                Some(task.created)
+            }
+            None => None,
+        })
+        .min_by_key(|moment| moment.unix_microseconds)
+        .unwrap_or(goal.created)
+}
+
 /// The author half of a comment on a goal, with the same rule a task's thread applies: text without an
 /// author would leave a thread of anonymous notes, and MCP has no session to derive one from.
 fn build_goal_comment(
@@ -458,6 +584,180 @@ mod tests {
             blank_comment.is_empty(),
             "whitespace is not a comment, so it is not a change either"
         );
+    }
+
+    fn at(src: &str) -> DateTimeAsMicroseconds {
+        DateTimeAsMicroseconds::from_str(src).unwrap()
+    }
+
+    fn open_goal() -> GoalModel {
+        GoalModel {
+            project_id: "p0".to_string(),
+            number: 7,
+            name: "Timeline".to_string(),
+            description: String::new(),
+            color: task_manager_shared::kind_color::KindColor::default(),
+            priority: task_manager_shared::priority::Priority::default(),
+            subtasks: Vec::new(),
+            documents: Vec::new(),
+            releases: Vec::new(),
+            comments: Vec::new(),
+            created: at("2026-10-01T09:00:00"),
+            updated: at("2026-10-01T09:00:00"),
+            start_moment: None,
+            close_moment: None,
+            deleted_moment: None,
+        }
+    }
+
+    const NOW: &str = "2026-10-10T12:00:00";
+
+    fn apply(goal: &mut GoalModel, patch: GoalPatch, was_closed: bool) -> Result<(), String> {
+        apply_moments(goal, &patch, was_closed, at(NOW), "TM-G7", |_| {
+            at("2026-10-03T08:00:00")
+        })
+    }
+
+    /// `now` is what an agent passes as it begins; a date is what it passes when recording the past.
+    #[test]
+    fn a_start_is_now_or_a_moment_that_has_passed() {
+        let now = at(NOW);
+
+        assert_eq!(parse_goal_moment("now", "started_at", now).unwrap(), now);
+        assert_eq!(parse_goal_moment(" NOW ", "started_at", now).unwrap(), now);
+        assert_eq!(
+            parse_goal_moment("2026-10-05", "started_at", now).unwrap(),
+            at("2026-10-05T00:00:00")
+        );
+
+        let future = parse_goal_moment("2026-10-11", "started_at", now).unwrap_err();
+        assert!(future.contains("in the future"), "{future}");
+
+        let nonsense = parse_goal_moment("yesterday", "started_at", now).unwrap_err();
+        assert!(
+            nonsense.contains("started_at"),
+            "the refusal names the field: {nonsense}"
+        );
+    }
+
+    #[test]
+    fn a_start_is_set_corrected_and_cleared() {
+        let mut goal = open_goal();
+
+        let set = GoalPatch {
+            started_at: Some("now".to_string()),
+            ..Default::default()
+        };
+        assert!(!set.is_empty());
+        apply(&mut goal, set, false).unwrap();
+        assert_eq!(goal.start_moment, Some(at(NOW)));
+
+        let cleared = GoalPatch {
+            started_at: Some(" ".to_string()),
+            ..Default::default()
+        };
+        apply(&mut goal, cleared, false).unwrap();
+        assert_eq!(
+            goal.start_moment, None,
+            "an empty string undoes a start set by mistake"
+        );
+    }
+
+    /// Closing is moving the goal to done, and it stamps the end — now, or when the caller says it was.
+    #[test]
+    fn closing_stamps_the_end_and_a_closed_goal_always_has_a_start() {
+        let mut goal = open_goal();
+
+        let close = GoalPatch {
+            close: Some(true),
+            ..Default::default()
+        };
+        apply(&mut goal, close, false).unwrap();
+
+        assert_eq!(goal.close_moment, Some(at(NOW)));
+        assert_eq!(
+            goal.start_moment,
+            Some(at("2026-10-03T08:00:00")),
+            "nobody gave a start, so it is when its work began"
+        );
+
+        let mut backdated = open_goal();
+        backdated.start_moment = Some(at("2026-10-02T10:00:00"));
+
+        let close_earlier = GoalPatch {
+            close: Some(true),
+            closed_at: Some("2026-10-08T17:00:00+03:00".to_string()),
+            ..Default::default()
+        };
+        apply(&mut backdated, close_earlier, false).unwrap();
+
+        assert_eq!(backdated.close_moment, Some(at("2026-10-08T14:00:00")));
+        assert_eq!(
+            backdated.start_moment,
+            Some(at("2026-10-02T10:00:00")),
+            "a start somebody gave is kept"
+        );
+    }
+
+    #[test]
+    fn closed_at_dates_a_close_and_nothing_else() {
+        let mut closed = open_goal();
+        closed.start_moment = Some(at("2026-10-02T10:00:00"));
+        closed.close_moment = Some(at("2026-10-09T10:00:00"));
+
+        let redate = GoalPatch {
+            closed_at: Some("2026-10-07".to_string()),
+            ..Default::default()
+        };
+        assert!(!redate.is_empty());
+        apply(&mut closed, redate, true).unwrap();
+        assert_eq!(closed.close_moment, Some(at("2026-10-07T00:00:00")));
+
+        let mut open = open_goal();
+        let nothing_to_date = GoalPatch {
+            closed_at: Some("2026-10-07".to_string()),
+            ..Default::default()
+        };
+        let refused = apply(&mut open, nothing_to_date, false).unwrap_err();
+        assert!(refused.contains("not closed"), "{refused}");
+
+        let mut reopening = closed.clone();
+        let contradiction = GoalPatch {
+            close: Some(false),
+            closed_at: Some("2026-10-07".to_string()),
+            ..Default::default()
+        };
+        assert!(apply(&mut reopening, contradiction, true).is_err());
+    }
+
+    #[test]
+    fn re_opening_clears_the_end_and_keeps_the_start() {
+        let mut goal = open_goal();
+        goal.start_moment = Some(at("2026-10-02T10:00:00"));
+        goal.close_moment = Some(at("2026-10-09T10:00:00"));
+
+        let reopen = GoalPatch {
+            close: Some(false),
+            ..Default::default()
+        };
+        apply(&mut goal, reopen, true).unwrap();
+
+        assert_eq!(goal.close_moment, None);
+        assert_eq!(goal.start_moment, Some(at("2026-10-02T10:00:00")));
+    }
+
+    #[test]
+    fn a_goal_does_not_start_after_it_closed() {
+        let mut goal = open_goal();
+        goal.start_moment = Some(at("2026-10-02T10:00:00"));
+        goal.close_moment = Some(at("2026-10-05T10:00:00"));
+
+        let too_late = GoalPatch {
+            started_at: Some("2026-10-06".to_string()),
+            ..Default::default()
+        };
+        let refused = apply(&mut goal, too_late, true).unwrap_err();
+        assert!(refused.contains("start after it closed"), "{refused}");
     }
 
     /// A colour is a change like any other — the Goals screen makes exactly this call and nothing else.

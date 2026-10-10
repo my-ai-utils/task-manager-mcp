@@ -74,6 +74,9 @@ it is kept.
   went.
 - **Deleting is not closing.** Closing says how a goal went; deleting says it should never have existed.
   The tasks under a deleted goal are not deleted — they read as standing on their own.
+- **A goal has a start and an end.** The start is when work on it began: set through MCP, or stamped
+  by itself when the first task under it leaves Todo. The end is when it was closed — moved to done —
+  and can be given a date of its own. A task's start is stamped when it leaves Todo.
 - A closed goal leaves the screen after the project's archive window, like finished work.
 - A goal lists the **releases** it went out in.
 
@@ -176,7 +179,7 @@ separately, under Settings.
 | Screen | |
 |---|---|
 | **Home** | The board of one project: columns of cards, most urgent first. Filters by task type, assignee and goal, and a search box. A card is dragged to another column; a double-click opens it with its text, checklist, documents, builds and thread. |
-| **Goals** | Every goal with its progress, priority and status — Todo, In Progress or Done — and its tasks folded underneath. The eye opens the goal: its text, and tabs for its comments and for the releases it went out in. This is also where a goal's colour is picked. **Timeline** shows the same goals as a Gantt chart over one month: a bar from the day a goal was opened to the day it was closed (or to today), with marks for its releases and for the days its tasks were done; ‹ and › move between months, closed goals of past months included. |
+| **Goals** | Every goal with its progress, priority and status — Todo, In Progress or Done — and its tasks folded underneath. The eye opens the goal: its text, and tabs for its comments and for the releases it went out in. This is also where a goal's colour is picked. **Timeline** shows the same goals as a Gantt chart over one month: a bar from the day a goal started to the day it was closed (or to today), a dashed line for the time it waited before it started, and marks for its releases and for the days its tasks were done. A click on a goal unfolds its tasks underneath, each with its own wait and bar; the eye opens the goal. ‹ and › move between months, closed goals of past months included; **Hide done** puts away the goals and tasks that are finished. |
 | **Releases** | What has gone out, newest first. Each row shows the goal it shipped, the environments it is on, whether it is done, a flag when a service needs its settings changed, and the versions. Filters by microservice, by environment and by state: it opens on what is still in progress, and the browser remembers the filters it was left with. |
 | **Documents** | The project's documents and its connected repositories as one tree, with a viewer beside it. |
 | **Projects setup** | Admins only. Every project, with **Edit** (name, description, prefix, templates, archive window), **Members**, **GitHub**, **Export**, **Import** and **Archive**. |
@@ -199,7 +202,7 @@ The endpoint is `/mcp` on the same host. Everything is named the way a person na
 | `tasks_add_comment` · `tasks_get_comments` | A task's thread. |
 | `tasks_search` | Find work by what was written about it. |
 | `tasks_resolve_id` | What an id somebody quoted refers to now — a task, a goal or a release. |
-| `goals_list` · `goals_create` · `goals_update` · `goals_delete` | The goals of a project; open one; rename, rewrite, close or reopen it and say which releases it went out in; delete it. |
+| `goals_list` · `goals_create` · `goals_update` · `goals_delete` | The goals of a project; open one; rename, rewrite, start, close or reopen it — with a start date and an end date of its own — and say which releases it went out in; delete it. |
 | `goals_add_comment` · `goals_get_comments` | A goal's thread. |
 | `releases_list` · `releases_create` · `releases_update` · `releases_delete` | The releases of a project, filtered by goal, microservice, environment or whether they are done; record one; add services and environments to it, or close it; delete it. |
 | `releases_add_comment` · `releases_get_comments` | A release's thread. |

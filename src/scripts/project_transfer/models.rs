@@ -203,6 +203,9 @@ pub struct GoalFileModel {
     pub releases: Vec<String>,
     pub created: String,
     pub updated: String,
+    // Defaulted: a file written before starts were recorded has no such line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closed: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -246,6 +249,9 @@ pub struct TaskFileModel {
     pub gh_actions: Vec<GhActionFileModel>,
     pub created: String,
     pub updated: String,
+    // Defaulted: a file written before starts were recorded has no such line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closed: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -123,6 +123,10 @@ pub struct TaskResponse {
     pub comments: Vec<TaskCommentResponse>,
     pub created_unix_seconds: i64,
     pub updated_unix_seconds: i64,
+    // When the task left Todo, and absent while it is there. Absent too on a task that left it before the
+    // moment was recorded — tell the two apart by `status`.
+    #[serde(default)]
+    pub started_unix_seconds: Option<i64>,
     // When the task landed in Done, and absent whenever it is not there. Home shows it, and it is what
     // the seven-day archive window is measured from — a task closed longer ago than that is not returned
     // at all.
@@ -278,6 +282,7 @@ mod tests {
             comments: Vec::new(),
             created_unix_seconds: 0,
             updated_unix_seconds: 0,
+            started_unix_seconds: None,
             closed_unix_seconds,
             deleted_unix_seconds: None,
         }

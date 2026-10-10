@@ -110,6 +110,11 @@ pub struct GoalDto {
     pub created: DateTimeAsMicroseconds,
     #[sql_type("timestamp")]
     pub updated: DateTimeAsMicroseconds,
+    // When work on the goal began; NULL until it has — see `GoalModel::start_moment`. Nullable because the
+    // column arrives on a populated table, and because "not started" and "started at the epoch" are
+    // different facts.
+    #[sql_type("timestamp")]
+    pub start_moment: Option<DateTimeAsMicroseconds>,
     // When the goal was closed; NULL while it is open. Nullable rather than defaulted, because "still
     // open" and "closed at the epoch" are different facts and only one of them is true of a live goal.
     #[sql_type("timestamp")]

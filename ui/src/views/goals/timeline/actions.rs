@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use task_manager_shared::goals::GoalResponse;
+use task_manager_shared::projects::{COLUMN_ID_DONE, COLUMN_ID_TODO};
 use task_manager_shared::tasks::TaskResponse;
 
 use super::super::render::GoalStatus;
@@ -142,47 +143,48 @@ pub fn date_of(unix_seconds: i64) -> String {
     format!("{year}-{month:02}-{day:02}")
 }
 
-/// The part of a goal's life that falls inside one month, in whole days.
+/// One stretch of a row inside one month, in whole days.
 ///
-/// A goal lives from when it was opened to when it was closed; an open one, until now. A bar is drawn over
-/// every day it was alive on, both ends included — a goal opened and closed on the same afternoon is one day
-/// wide, not invisible.
+/// A stretch covers every day it touches, both ends included — something started and finished on the same
+/// afternoon is one day wide, not invisible.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Span {
-    /// The first day of the month the bar covers, from 0.
+    /// The first day of the month the stretch covers, from 0.
     pub first: u32,
     /// The last day it covers, from 0, inclusive.
     pub last: u32,
-    /// It was already open when the month began — the bar runs in from the left edge.
+    /// It was already going when the month began — it runs in from the left edge.
     pub cut_before: bool,
-    /// It was still open when the month ended — the bar runs off the right edge.
+    /// It was still going when the month ended — it runs off the right edge.
     pub cut_after: bool,
-    /// It is open, and today is in this month: the bar stops at today because that is as far as it has got.
+    /// It has not ended, and today is in this month: it stops at today because that is as far as it has got.
     pub ongoing: bool,
 }
 
-pub fn span_in_month(month: Month, opened: i64, closed: Option<i64>, now: i64) -> Option<Span> {
-    // A goal with no close moment is alive up to now. One whose stamps disagree — closed "before" it was
-    // opened, which only a clock can do — is drawn as the day it was opened rather than as nothing.
-    let until = closed.unwrap_or(now).max(opened);
+/// The stretch from `from` to `until` inside `month`; `until` is `None` for one still going, which runs to
+/// `now`.
+pub fn span_in_month(month: Month, from: i64, until: Option<i64>, now: i64) -> Option<Span> {
+    // Stamps that disagree — an end "before" the start, which only a clock can do — draw as the one day it
+    // began on rather than as nothing.
+    let to = until.unwrap_or(now).max(from);
 
-    if until < month.start() || opened >= month.end() {
+    if to < month.start() || from >= month.end() {
         return None;
     }
 
-    let cut_before = opened < month.start();
-    let cut_after = until >= month.end();
+    let cut_before = from < month.start();
+    let cut_after = to >= month.end();
 
     let first = if cut_before {
         0
     } else {
-        ((opened - month.start()) / DAY) as u32
+        ((from - month.start()) / DAY) as u32
     };
 
     let last = if cut_after {
         month.days() - 1
     } else {
-        ((until - month.start()) / DAY) as u32
+        ((to - month.start()) / DAY) as u32
     };
 
     Some(Span {
@@ -190,8 +192,92 @@ pub fn span_in_month(month: Month, opened: i64, closed: Option<i64>, now: i64) -
         last,
         cut_before,
         cut_after,
-        ongoing: closed.is_none() && !cut_after,
+        ongoing: until.is_none() && !cut_after,
     })
+}
+
+/// When something was opened, when work on it started and when it was closed — on the wall clock.
+/// `started` is `None` for something nobody has started.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Life {
+    pub opened: i64,
+    pub started: Option<i64>,
+    pub closed: Option<i64>,
+}
+
+/// A goal's life. A goal under way with no start on record — one started before starts were recorded —
+/// counts from when it was opened, which is the most the board knows about it.
+pub fn goal_life(goal: &GoalResponse, status: GoalStatus, wall: &dyn Fn(i64) -> i64) -> Life {
+    let started = goal
+        .started_unix_seconds
+        .or_else(|| (status != GoalStatus::Todo).then_some(goal.created_unix_seconds));
+
+    Life {
+        opened: wall(goal.created_unix_seconds),
+        started: started.map(wall),
+        closed: goal.closed_unix_seconds.map(wall),
+    }
+}
+
+/// A task's life, with the same reading for a task that left Todo before its start was recorded.
+pub fn task_life(task: &TaskResponse, wall: &dyn Fn(i64) -> i64) -> Life {
+    let started = task
+        .started_unix_seconds
+        .or_else(|| (task.status != COLUMN_ID_TODO).then_some(task.created_unix_seconds));
+
+    Life {
+        opened: wall(task.created_unix_seconds),
+        started: started.map(wall),
+        closed: task.closed_unix_seconds.map(wall),
+    }
+}
+
+/// What a row draws in one month: the work, and the wait before it.
+///
+/// `work` is the bar proper — from the start to the close, or to today while it goes on. `waiting` is the
+/// time from being opened to being started, drawn as a dashed line: it is how something nobody has
+/// started is on the chart at all, and how long a thing sat before somebody took it up.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Bars {
+    pub waiting: Option<Span>,
+    pub work: Option<Span>,
+}
+
+impl Bars {
+    pub fn is_empty(&self) -> bool {
+        self.waiting.is_none() && self.work.is_none()
+    }
+}
+
+pub fn bars_in_month(month: Month, life: Life, now: i64) -> Bars {
+    let work = life
+        .started
+        .and_then(|started| span_in_month(month, started, life.closed, now));
+
+    let waiting = match life.started {
+        // Started no later than it was opened — a start written down after the fact: nothing waited.
+        Some(started) if started <= life.opened => None,
+        Some(started) => span_in_month(month, life.opened, Some(started), now),
+        None => span_in_month(month, life.opened, life.closed, now),
+    };
+
+    // Counted in days the two meet on the day work began, and that day is a day of work: the wait stops
+    // the day before, or is not drawn at all when there is no day before it in this month.
+    let waiting = match (waiting, work) {
+        (Some(mut waiting), Some(work)) if waiting.last >= work.first => {
+            if work.first == 0 || waiting.first >= work.first {
+                None
+            } else {
+                waiting.last = work.first - 1;
+                waiting.cut_after = false;
+                waiting.ongoing = false;
+                Some(waiting)
+            }
+        }
+        (waiting, _) => waiting,
+    };
+
+    Bars { waiting, work }
 }
 
 /// The goals the timeline draws: the live list, and the closed goals that have aged off it.
@@ -216,38 +302,88 @@ pub fn merge_with_archive(live: Vec<GoalResponse>, archive: &[GoalResponse]) -> 
     result
 }
 
-/// One row of the chart: a goal, its bar, and what happened on which day under it.
+/// A goal's row: its stretches, and what happened on which day under it.
 #[derive(Clone, PartialEq, Debug)]
-pub struct Lane {
+pub struct GoalLane {
     pub goal: GoalResponse,
     pub status: GoalStatus,
-    pub span: Span,
-    /// Day → the releases that went out that day, by title. Ordered, so the markers come out left to right.
+    pub life: Life,
+    pub bars: Bars,
+    /// Whether its tasks are unfolded underneath.
+    pub open: bool,
+    /// Day → the releases that went out that day, by title. Ordered, so the marks come out left to right.
     pub releases: BTreeMap<u32, Vec<String>>,
-    /// Day → the tasks of this goal closed that day, by id.
+    /// Day → the tasks of this goal done that day, by id.
     pub done: BTreeMap<u32, Vec<String>>,
 }
 
-/// The rows of one month, oldest goal first — the waterfall a timeline is read as.
+/// A task's row, under its goal.
+#[derive(Clone, PartialEq, Debug)]
+pub struct TaskLane {
+    pub task: TaskResponse,
+    /// The palette name of the goal it is under: a task is drawn in its goal's colour.
+    pub color: String,
+    pub life: Life,
+    pub bars: Bars,
+}
+
+/// One row of the chart, in the order they are drawn.
+#[derive(Clone, PartialEq, Debug)]
+pub enum Row {
+    Goal(GoalLane),
+    Task(TaskLane),
+    /// An unfolded goal with nothing under it to draw in this month — said, so an open goal with no rows
+    /// under it does not look like a goal that failed to open.
+    Nothing {
+        goal: String,
+    },
+}
+
+impl Row {
+    /// What the row is known by across a repaint.
+    pub fn key(&self) -> String {
+        match self {
+            Self::Goal(lane) => lane.goal.id.clone(),
+            Self::Task(lane) => lane.task.id.clone(),
+            Self::Nothing { goal } => format!("{goal}-nothing"),
+        }
+    }
+}
+
+/// Where a row sorts: what has started first, in the order it started, and what is still waiting after
+/// it, in the order it was opened. The waterfall a timeline is read as.
+fn waterfall(life: &Life, id: &str) -> (bool, i64, String) {
+    (
+        life.started.is_none(),
+        life.started.unwrap_or(life.opened),
+        id.to_string(),
+    )
+}
+
+/// The rows of one month: each goal that has anything to draw in it, and under each unfolded one, its tasks
+/// that do.
 ///
 /// `now` is on the wall clock already; `wall` moves a stamp onto it — see [`Month`]. A release's date is
-/// the one moment that does not go through it.
+/// the one moment that does not go through it. `hide_done` leaves out the tasks that are done; which goals
+/// are here at all is the caller's to decide.
 pub fn lay_out(
     month: Month,
     goals: Vec<(GoalResponse, GoalStatus)>,
     of_goal: &HashMap<String, Vec<TaskResponse>>,
+    expanded: &[String],
+    hide_done: bool,
     now: i64,
     wall: &dyn Fn(i64) -> i64,
-) -> Vec<Lane> {
-    let mut lanes: Vec<Lane> = goals
+) -> Vec<Row> {
+    let mut lanes: Vec<GoalLane> = goals
         .into_iter()
         .filter_map(|(goal, status)| {
-            let span = span_in_month(
-                month,
-                wall(goal.created_unix_seconds),
-                goal.closed_unix_seconds.map(wall),
-                now,
-            )?;
+            let life = goal_life(&goal, status, wall);
+            let bars = bars_in_month(month, life, now);
+
+            if bars.is_empty() {
+                return None;
+            }
 
             let mut releases: BTreeMap<u32, Vec<String>> = BTreeMap::new();
 
@@ -259,11 +395,7 @@ pub fn lay_out(
 
             let mut done: BTreeMap<u32, Vec<String>> = BTreeMap::new();
 
-            for task in of_goal
-                .get(&goal.id)
-                .map(|itm| itm.as_slice())
-                .unwrap_or(&[])
-            {
+            for task in tasks_of(of_goal, &goal.id) {
                 if let Some(day) = task
                     .closed_unix_seconds
                     .and_then(|at| month.day_of(wall(at)))
@@ -272,24 +404,63 @@ pub fn lay_out(
                 }
             }
 
-            Some(Lane {
+            Some(GoalLane {
+                open: expanded.contains(&goal.id),
                 goal,
                 status,
-                span,
+                life,
+                bars,
                 releases,
                 done,
             })
         })
         .collect();
 
-    lanes.sort_by(|left, right| {
-        left.goal
-            .created_unix_seconds
-            .cmp(&right.goal.created_unix_seconds)
-            .then_with(|| left.goal.id.cmp(&right.goal.id))
-    });
+    lanes.sort_by_key(|lane| waterfall(&lane.life, &lane.goal.id));
 
-    lanes
+    let mut rows = Vec::new();
+
+    for lane in lanes {
+        let open = lane.open;
+        let goal = lane.goal.id.clone();
+        let color = lane.goal.color.clone();
+
+        rows.push(Row::Goal(lane));
+
+        if !open {
+            continue;
+        }
+
+        let mut tasks: Vec<TaskLane> = tasks_of(of_goal, &goal)
+            .iter()
+            .filter(|task| !(hide_done && task.status == COLUMN_ID_DONE))
+            .filter_map(|task| {
+                let life = task_life(task, wall);
+                let bars = bars_in_month(month, life, now);
+
+                (!bars.is_empty()).then(|| TaskLane {
+                    task: task.clone(),
+                    color: color.clone(),
+                    life,
+                    bars,
+                })
+            })
+            .collect();
+
+        if tasks.is_empty() {
+            rows.push(Row::Nothing { goal });
+            continue;
+        }
+
+        tasks.sort_by_key(|lane| waterfall(&lane.life, &lane.task.id));
+        rows.extend(tasks.into_iter().map(Row::Task));
+    }
+
+    rows
+}
+
+fn tasks_of<'a>(of_goal: &'a HashMap<String, Vec<TaskResponse>>, goal: &str) -> &'a [TaskResponse] {
+    of_goal.get(goal).map(|itm| itm.as_slice()).unwrap_or(&[])
 }
 
 /// A unix stamp moved onto the reader's wall clock — see [`Month`].
@@ -336,6 +507,7 @@ mod tests {
             comments: Vec::new(),
             created_unix_seconds: opened,
             updated_unix_seconds: opened,
+            started_unix_seconds: None,
             closed_unix_seconds: closed,
             deleted_unix_seconds: None,
         }
@@ -463,38 +635,15 @@ mod tests {
         assert_eq!(merged[0].name, "RMS-G2", "the live copy wins");
     }
 
-    #[test]
-    fn lanes_come_oldest_first_with_their_days_marked() {
-        let mut late = goal("RMS-G1", OCT_7 + 5 * DAY, None);
-        late.releases
-            .push(task_manager_shared::releases::ReleaseResponse {
-                id: "RMS-R1".to_string(),
-                project: "RMS".to_string(),
-                title: "1.0".to_string(),
-                description: String::new(),
-                release_notes: String::new(),
-                date_unix_seconds: OCT_7 + 6 * DAY,
-                services: Vec::new(),
-                goals: Vec::new(),
-                envs: Vec::new(),
-                done_unix_seconds: None,
-                comments: Vec::new(),
-                created_unix_seconds: 0,
-                updated_unix_seconds: 0,
-                deleted_unix_seconds: None,
-            });
-
-        let early = goal("RMS-G2", OCT_7, Some(OCT_7 + DAY));
-        let elsewhere = goal("RMS-G3", OCT_7 - 60 * DAY, Some(OCT_7 - 50 * DAY));
-
-        let closed_task = TaskResponse {
-            id: "RMS-5".to_string(),
+    fn task(id: &str, goal: &str, status: &str, opened: i64) -> TaskResponse {
+        TaskResponse {
+            id: id.to_string(),
             project: "RMS".to_string(),
-            text: "RMS-5".to_string(),
-            status: task_manager_shared::projects::COLUMN_ID_DONE.to_string(),
+            text: id.to_string(),
+            status: status.to_string(),
             priority: String::new(),
             kind: None,
-            goal: Some("RMS-G1".to_string()),
+            goal: Some(goal.to_string()),
             goal_name: None,
             goal_color: None,
             assignee: None,
@@ -508,35 +657,233 @@ mod tests {
             subtasks: Vec::new(),
             gh_actions: Vec::new(),
             comments: Vec::new(),
-            created_unix_seconds: OCT_7,
-            updated_unix_seconds: OCT_7,
-            closed_unix_seconds: Some(OCT_7 + 6 * DAY + 60),
+            created_unix_seconds: opened,
+            updated_unix_seconds: opened,
+            started_unix_seconds: None,
+            closed_unix_seconds: None,
             deleted_unix_seconds: None,
+        }
+    }
+
+    fn release(title: &str, date: i64) -> task_manager_shared::releases::ReleaseResponse {
+        task_manager_shared::releases::ReleaseResponse {
+            id: format!("RMS-R{title}"),
+            project: "RMS".to_string(),
+            title: title.to_string(),
+            description: String::new(),
+            release_notes: String::new(),
+            date_unix_seconds: date,
+            services: Vec::new(),
+            goals: Vec::new(),
+            envs: Vec::new(),
+            done_unix_seconds: None,
+            comments: Vec::new(),
+            created_unix_seconds: 0,
+            updated_unix_seconds: 0,
+            deleted_unix_seconds: None,
+        }
+    }
+
+    fn days(span: Option<Span>) -> Option<(u32, u32)> {
+        span.map(|itm| (itm.first, itm.last))
+    }
+
+    /// Opened on the 1st, started on the 5th, closed on the 9th: four days of waiting, then the work —
+    /// meeting, not overlapping, on the day work began.
+    #[test]
+    fn the_wait_runs_up_to_the_day_work_starts() {
+        let first = october().start();
+        let life = Life {
+            opened: first + 9 * 3600,
+            started: Some(first + 4 * DAY + 10 * 3600),
+            closed: Some(first + 8 * DAY + 3600),
         };
+
+        let bars = bars_in_month(october(), life, OCT_7 + 10 * DAY);
+
+        assert_eq!(days(bars.waiting), Some((0, 3)));
+        assert_eq!(days(bars.work), Some((4, 8)));
+
+        let same_day = Life {
+            started: Some(first + 15 * 3600),
+            ..life
+        };
+        assert_eq!(
+            bars_in_month(october(), same_day, OCT_7).waiting,
+            None,
+            "started the day it was opened: nothing waited"
+        );
+    }
+
+    /// Nobody has started it: the whole of its life so far is a wait, still going today.
+    #[test]
+    fn what_has_not_started_is_a_wait_up_to_today() {
+        let life = Life {
+            opened: OCT_7,
+            started: None,
+            closed: None,
+        };
+
+        let bars = bars_in_month(october(), life, OCT_7 + 3 * DAY);
+
+        assert_eq!(bars.work, None);
+        assert_eq!(days(bars.waiting), Some((6, 9)));
+        assert!(bars.waiting.unwrap().ongoing);
+    }
+
+    /// Opened in September, started in October: September shows only the wait, running off its edge.
+    #[test]
+    fn a_wait_that_crosses_a_month_ends_with_it() {
+        let life = Life {
+            opened: OCT_7 - 17 * DAY,
+            started: Some(OCT_7 - 4 * DAY),
+            closed: None,
+        };
+        let now = OCT_7 + 3 * DAY;
+
+        let september = bars_in_month(october().prev(), life, now);
+        assert_eq!(days(september.waiting), Some((19, 29)));
+        assert!(september.waiting.unwrap().cut_after);
+        assert_eq!(september.work, None);
+
+        let this_month = bars_in_month(october(), life, now);
+        assert_eq!(days(this_month.waiting), Some((0, 1)));
+        assert_eq!(days(this_month.work), Some((2, 9)));
+    }
+
+    /// Work that left Todo before starts were recorded is drawn from when it was opened — the most the
+    /// board knows — and work still in Todo is not started, whatever else is true of it.
+    #[test]
+    fn work_with_no_start_on_record_counts_from_when_it_was_opened() {
+        let identity = |at: i64| at;
+
+        let legacy = task(
+            "RMS-1",
+            "RMS-G1",
+            task_manager_shared::projects::COLUMN_ID_DONE,
+            OCT_7,
+        );
+        assert_eq!(task_life(&legacy, &identity).started, Some(OCT_7));
+
+        let queued = task("RMS-2", "RMS-G1", COLUMN_ID_TODO, OCT_7);
+        assert_eq!(task_life(&queued, &identity).started, None);
+
+        let mut recorded = task("RMS-3", "RMS-G1", "in-progress", OCT_7);
+        recorded.started_unix_seconds = Some(OCT_7 + DAY);
+        assert_eq!(task_life(&recorded, &identity).started, Some(OCT_7 + DAY));
+
+        let talked_about = goal("RMS-G1", OCT_7, None);
+        assert_eq!(
+            goal_life(&talked_about, GoalStatus::Todo, &identity).started,
+            None
+        );
+        assert_eq!(
+            goal_life(&talked_about, GoalStatus::InProgress, &identity).started,
+            Some(OCT_7),
+            "under way with no start on record"
+        );
+    }
+
+    #[test]
+    fn goals_come_in_the_order_they_started_with_their_days_marked() {
+        let mut late = goal("RMS-G1", OCT_7 + 5 * DAY, None);
+        late.started_unix_seconds = Some(OCT_7 + 5 * DAY);
+        late.releases.push(release("1.0", OCT_7 + 6 * DAY));
+
+        let mut early = goal("RMS-G2", OCT_7 - 20 * DAY, Some(OCT_7 + DAY));
+        early.started_unix_seconds = Some(OCT_7);
+
+        let waiting = goal("RMS-G4", OCT_7 - 30 * DAY, None);
+        let elsewhere = goal("RMS-G3", OCT_7 - 60 * DAY, Some(OCT_7 - 50 * DAY));
+
+        let mut closed_task = task(
+            "RMS-5",
+            "RMS-G1",
+            task_manager_shared::projects::COLUMN_ID_DONE,
+            OCT_7,
+        );
+        closed_task.closed_unix_seconds = Some(OCT_7 + 6 * DAY + 60);
 
         let of_goal = HashMap::from([("RMS-G1".to_string(), vec![closed_task])]);
 
-        let lanes = lay_out(
+        let rows = lay_out(
             october(),
             vec![
                 (late, GoalStatus::InProgress),
+                (waiting, GoalStatus::Todo),
                 (early, GoalStatus::Done),
                 (elsewhere, GoalStatus::Done),
             ],
             &of_goal,
+            &[],
+            false,
             OCT_7 + 10 * DAY,
             &|at| at,
         );
 
-        let ids: Vec<&str> = lanes.iter().map(|itm| itm.goal.id.as_str()).collect();
+        let keys: Vec<String> = rows.iter().map(Row::key).collect();
         assert_eq!(
-            ids,
-            ["RMS-G2", "RMS-G1"],
-            "oldest first, and a goal of another month is not here"
+            keys,
+            ["RMS-G2", "RMS-G1", "RMS-G4"],
+            "in the order work began, what is still waiting last, and a goal of another month not at all"
         );
 
-        assert_eq!(lanes[1].releases.get(&12), Some(&vec!["1.0".to_string()]));
-        assert_eq!(lanes[1].done.get(&12), Some(&vec!["RMS-5".to_string()]));
-        assert!(lanes[0].releases.is_empty() && lanes[0].done.is_empty());
+        let Row::Goal(marked) = &rows[1] else {
+            panic!("a goal row");
+        };
+        assert_eq!(marked.releases.get(&12), Some(&vec!["1.0".to_string()]));
+        assert_eq!(marked.done.get(&12), Some(&vec!["RMS-5".to_string()]));
+        assert!(!marked.open, "folded unless somebody unfolded it");
+    }
+
+    /// Unfolding a goal puts its tasks under it, in the order they started; Hide done takes the finished
+    /// ones out; and a goal with nothing left to show says so rather than opening onto nothing.
+    #[test]
+    fn an_unfolded_goal_lists_its_tasks_under_it() {
+        let mut goal_row = goal("RMS-G1", OCT_7 - 10 * DAY, None);
+        goal_row.started_unix_seconds = Some(OCT_7 - 9 * DAY);
+
+        let mut done = task(
+            "RMS-11",
+            "RMS-G1",
+            task_manager_shared::projects::COLUMN_ID_DONE,
+            OCT_7 - 9 * DAY,
+        );
+        done.started_unix_seconds = Some(OCT_7 - 8 * DAY);
+        done.closed_unix_seconds = Some(OCT_7 - 2 * DAY);
+
+        let mut going = task("RMS-12", "RMS-G1", "in-progress", OCT_7 - 9 * DAY);
+        going.started_unix_seconds = Some(OCT_7 - DAY);
+
+        let queued = task("RMS-13", "RMS-G1", COLUMN_ID_TODO, OCT_7);
+
+        let of_goal = HashMap::from([(
+            "RMS-G1".to_string(),
+            vec![queued.clone(), going.clone(), done.clone()],
+        )]);
+
+        let lay = |hide_done: bool, of_goal: &HashMap<String, Vec<TaskResponse>>| -> Vec<String> {
+            lay_out(
+                october(),
+                vec![(goal_row.clone(), GoalStatus::InProgress)],
+                of_goal,
+                &["RMS-G1".to_string()],
+                hide_done,
+                OCT_7 + 3 * DAY,
+                &|at| at,
+            )
+            .iter()
+            .map(Row::key)
+            .collect()
+        };
+
+        assert_eq!(
+            lay(false, &of_goal),
+            ["RMS-G1", "RMS-11", "RMS-12", "RMS-13"]
+        );
+        assert_eq!(lay(true, &of_goal), ["RMS-G1", "RMS-12", "RMS-13"]);
+
+        let only_done = HashMap::from([("RMS-G1".to_string(), vec![done])]);
+        assert_eq!(lay(true, &only_done), ["RMS-G1", "RMS-G1-nothing"]);
     }
 }

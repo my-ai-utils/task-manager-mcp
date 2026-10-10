@@ -56,6 +56,12 @@ pub struct GoalResponse {
     pub comments: Vec<TaskCommentResponse>,
     pub created_unix_seconds: i64,
     pub updated_unix_seconds: i64,
+    // When work on the goal began, and absent until it has — the start of its bar on the timeline, where
+    // `closed_unix_seconds` is the end. Set by whoever does the work, or stamped when the first task under
+    // the goal leaves Todo. Absent on a goal from before the field existed too, which is why a reader that
+    // must draw SOMETHING for a goal that is plainly under way falls back to `created_unix_seconds`.
+    #[serde(default)]
+    pub started_unix_seconds: Option<i64>,
     // When the goal was closed, and absent while it is open. What the archive window is measured from: a
     // goal closed longer ago than the project's window is not returned unless asked for.
     pub closed_unix_seconds: Option<i64>,

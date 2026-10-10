@@ -38,6 +38,7 @@ impl From<&GoalDto> for GoalModel {
             comments: src.comments.iter().map(|itm| itm.into()).collect(),
             created: src.created,
             updated: src.updated,
+            start_moment: src.start_moment,
             close_moment: src.close_moment,
             deleted_moment: src.deleted_moment,
         }
@@ -65,6 +66,7 @@ impl From<&GoalModel> for GoalDto {
             comments: src.comments.iter().map(|itm| itm.into()).collect(),
             created: src.created,
             updated: src.updated,
+            start_moment: src.start_moment,
             close_moment: src.close_moment,
             deleted_moment: src.deleted_moment,
         }
@@ -159,6 +161,9 @@ pub fn goal_to_response(src: &GoalModel, project: &ProjectModel, board: &BoardIn
             .collect(),
         created_unix_seconds: src.created.unix_microseconds / 1_000_000,
         updated_unix_seconds: src.updated.unix_microseconds / 1_000_000,
+        started_unix_seconds: src
+            .start_moment
+            .map(|itm| itm.unix_microseconds / 1_000_000),
         closed_unix_seconds: src
             .close_moment
             .map(|itm| itm.unix_microseconds / 1_000_000),

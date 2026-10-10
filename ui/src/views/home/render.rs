@@ -1292,6 +1292,7 @@ mod tests {
             comments: Vec::new(),
             created_unix_seconds: 0,
             updated_unix_seconds: 0,
+            started_unix_seconds: None,
             closed_unix_seconds: None,
             deleted_unix_seconds: None,
         }

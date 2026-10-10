@@ -268,8 +268,17 @@ pub struct GoalModel {
     pub created: DateTimeAsMicroseconds,
     // Moved by a change to the goal itself. A comment does NOT move it, as on a task.
     pub updated: DateTimeAsMicroseconds,
+    // When work on the goal began, and `None` until it has. The START of the goal's span on the timeline —
+    // which `created` is not: a goal is opened while it is still being talked about, and the work can start
+    // weeks later.
+    //
+    // Set by whoever does the work, through goals_create / goals_update; and if nobody has, stamped by the
+    // server when the first task under the goal leaves Todo — work has begun by then whether anybody said
+    // so or not. Never cleared by anything but an explicit call: re-opening a goal does not un-start it.
+    pub start_moment: Option<DateTimeAsMicroseconds>,
     // When the goal was closed, and `None` while it is open — which makes this the whole of its state.
-    // Cleared on re-opening, so a re-closed goal is dated by its latest close.
+    // Cleared on re-opening, so a re-closed goal is dated by its latest close. The END of its span on the
+    // timeline.
     pub close_moment: Option<DateTimeAsMicroseconds>,
     // When it was deleted, and `None` for one that is not.
     //
@@ -543,6 +552,13 @@ pub struct TaskModel {
     // Moved by a change to the task itself. A comment does NOT move it: the thread is a separate
     // record from the work.
     pub updated: DateTimeAsMicroseconds,
+    // When the task left Todo — the moment work on it began — and `None` while it is in Todo.
+    //
+    // Stamped on the way out of Todo and cleared on the way back, the way `close_moment` is stamped on the
+    // way into Done and cleared on the way out: a task put back in the queue has not started, and one taken
+    // up again is dated by its latest start. A task moved straight from Todo to Done started and finished
+    // at the same moment, which is what the board knows about it.
+    pub start_moment: Option<DateTimeAsMicroseconds>,
     // When the task was moved into Done, and `None` whenever it is not there.
     //
     // Separate from `updated` because that moves on every edit, including edits made after the work

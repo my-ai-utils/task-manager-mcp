@@ -129,6 +129,7 @@ impl From<&TaskDto> for TaskModel {
             comments: src.comments.iter().map(|itm| itm.into()).collect(),
             created: src.created,
             updated: src.updated,
+            start_moment: src.start_moment,
             close_moment: src.close_moment,
             deleted_moment: src.deleted_moment,
         }
@@ -159,6 +160,7 @@ impl From<&TaskModel> for TaskDto {
             comments: src.comments.iter().map(|itm| itm.into()).collect(),
             created: src.created,
             updated: src.updated,
+            start_moment: src.start_moment,
             close_moment: src.close_moment,
             deleted_moment: src.deleted_moment,
         }
@@ -248,6 +250,9 @@ pub fn task_to_response(
             .collect(),
         created_unix_seconds: task.created.unix_microseconds / 1_000_000,
         updated_unix_seconds: task.updated.unix_microseconds / 1_000_000,
+        started_unix_seconds: task
+            .start_moment
+            .map(|itm| itm.unix_microseconds / 1_000_000),
         closed_unix_seconds: task
             .close_moment
             .map(|itm| itm.unix_microseconds / 1_000_000),

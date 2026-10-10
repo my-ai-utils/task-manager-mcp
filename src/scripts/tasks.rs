@@ -5,7 +5,7 @@ use task_manager_shared::projects::{COLUMN_ID_DONE, COLUMN_ID_TODO};
 use crate::app::AppContext;
 use crate::board::{ProjectModel, TaskModel};
 use crate::mappers::parse_dependency;
-use crate::postgres::TaskDto;
+use crate::postgres::{GoalDto, TaskDto};
 
 use super::resolve::{resolve_project_by_prefix, resolve_task};
 
@@ -248,6 +248,8 @@ pub async fn create_task(app: &AppContext, new_task: NewTask) -> Result<String, 
         comments: Vec::new(),
         created: now,
         updated: now,
+        // Created in Todo, so not started — that is moving it on.
+        start_moment: None,
         // Nothing is created closed — a task always starts in Todo.
         close_moment: None,
         deleted_moment: None,
@@ -275,6 +277,24 @@ pub async fn create_task(app: &AppContext, new_task: NewTask) -> Result<String, 
 ///
 /// `new_status` is the raw stored value, already validated against the project, so comparing it to the
 /// anchor directly is enough — an unknown status can never equal `done`.
+/// Where a task's start goes as its status moves — see `TaskModel::start_moment`. Out of Todo stamps it,
+/// back into Todo clears it, and anything else leaves it as it was: a task that left Todo before starts
+/// were recorded keeps having none, rather than starting on the day somebody relabels it.
+fn next_start(
+    current: Option<DateTimeAsMicroseconds>,
+    was_todo: bool,
+    is_todo: bool,
+    now: DateTimeAsMicroseconds,
+) -> Option<DateTimeAsMicroseconds> {
+    if is_todo {
+        None
+    } else if was_todo {
+        Some(now)
+    } else {
+        current
+    }
+}
+
 fn is_landing(was_done: bool, new_status: &str) -> bool {
     new_status == COLUMN_ID_DONE && !was_done
 }
@@ -408,6 +428,8 @@ pub async fn update_task(
     // whether it ends up there. A task already in Done can be re-labelled or reassigned without being made
     // to justify itself again.
     let was_done = project.effective_status(&task.status) == COLUMN_ID_DONE;
+    // And whether it moves OUT of Todo — which is when work on it starts.
+    let was_todo = project.effective_status(&task.status) == COLUMN_ID_TODO;
 
     if let Some(text) = &patch.text {
         if text.trim().is_empty() {
@@ -499,6 +521,19 @@ pub async fn update_task(
         task.comments.push(comment);
     }
 
+    // The start, the same way round as the close below: stamped on the way out of Todo, cleared on the way
+    // back. A task not in Todo with no start left it before starts were recorded, and an unrelated edit
+    // must not date its start to today.
+    let is_todo = project.effective_status(&task.status) == COLUMN_ID_TODO;
+    let starting = was_todo && !is_todo;
+
+    task.start_moment = next_start(
+        task.start_moment,
+        was_todo,
+        is_todo,
+        DateTimeAsMicroseconds::now(),
+    );
+
     // Stamped on the way in and cleared on the way out, so a re-opened task carries no close date and a
     // re-closed one is dated by its latest close. Left alone while the task simply sits in Done, which is
     // what keeps the archive window measuring "closed N days ago" rather than "last touched N days ago".
@@ -524,6 +559,27 @@ pub async fn update_task(
     let ctx = MyTelemetryContext::create_empty();
     let dto: TaskDto = (&task).into();
     app.tasks_repo.upsert(&dto, &ctx).await;
+
+    // A goal starts with its first task, unless somebody already said when it did — see
+    // `GoalModel::start_moment`. Read from the snapshot this call started from; the task's own goal, after
+    // the patch, so a task moved under a goal and started in one call starts that goal.
+    let goal_starting = match (starting, task.goal_number) {
+        (true, Some(number)) => board
+            .get_goal(&project.id, number)
+            .filter(|goal| goal.start_moment.is_none())
+            .map(|goal| {
+                let mut goal = goal.as_ref().clone();
+                goal.start_moment = task.start_moment;
+                goal
+            }),
+        _ => None,
+    };
+
+    if let Some(goal) = goal_starting {
+        let dto: GoalDto = (&goal).into();
+        app.goals_repo.upsert(&dto, &ctx).await;
+        app.board.upsert_goal(goal);
+    }
 
     let handle = crate::board::compose_task_handle(&project.prefix, task.number);
     app.board.upsert_task(task);
@@ -607,6 +663,28 @@ pub async fn add_comment(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Out of Todo is when work starts; back into it un-starts the task; and nothing else touches the
+    /// moment — least of all an edit to a task that started before starts were recorded.
+    #[test]
+    fn a_task_starts_on_leaving_todo_and_only_then() {
+        let now = DateTimeAsMicroseconds::new(1_791_331_200_000_000);
+        let earlier = DateTimeAsMicroseconds::new(1_791_000_000_000_000);
+
+        assert_eq!(next_start(None, true, false, now), Some(now), "todo -> in progress");
+        assert_eq!(
+            next_start(Some(earlier), false, false, now),
+            Some(earlier),
+            "in progress -> done keeps when it started"
+        );
+        assert_eq!(next_start(Some(earlier), false, true, now), None, "back to todo");
+        assert_eq!(
+            next_start(None, false, false, now),
+            None,
+            "a task that left todo before starts were recorded is not started today"
+        );
+        assert_eq!(next_start(None, true, true, now), None, "todo stays todo");
+    }
 
     /// The rule is about the transition, not the destination. Getting this wrong in either direction is
     /// what makes the feature annoying: demand a comment on every edit of a finished task, or let work

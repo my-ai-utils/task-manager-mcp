@@ -163,8 +163,9 @@ pub fn RenderGoals() -> Element {
             }
         };
 
-        // The same status the list's badge shows, and the same filter on it. The tick has nothing to
-        // govern here — the month decides which goals are on screen — see `RenderHeader`.
+        // The same status the list's badge shows, and the same filter on it. In place of the list's tick,
+        // Hide done — which also takes the finished tasks out from under an unfolded goal.
+        let hide_done = cs_ra.hide_done;
         let on_timeline: Vec<(GoalResponse, GoalStatus)> = merge_with_archive(goals, &archive)
             .into_iter()
             .map(|goal| {
@@ -175,10 +176,16 @@ pub fn RenderGoals() -> Element {
                 let status = goal_status(&goal, under);
                 (goal, status)
             })
-            .filter(|(_, status)| wanted.is_none_or(|wanted| *status == wanted))
+            .filter(|(_, status)| match wanted {
+                // A chosen status wins over Hide done, as it wins over the tick in the list.
+                Some(wanted) => *status == wanted,
+                None => !hide_done || *status != GoalStatus::Done,
+            })
             .collect();
 
         let month = cs_ra.month;
+        let expanded = cs_ra.expanded.clone();
+        let current = current.clone();
         drop(cs_ra);
 
         return rsx! {
@@ -187,9 +194,13 @@ pub fn RenderGoals() -> Element {
                 RenderTimeline {
                     goals: on_timeline,
                     of_goal,
+                    project: current,
                     month,
                     wanted,
+                    expanded,
+                    hide_done,
                     on_month: move |month: Option<Month>| cs.write().show_month(month),
+                    on_toggle: move |goal: String| cs.write().toggle(&goal),
                 }
             }
         };
@@ -467,7 +478,11 @@ fn goal_status(goal: &GoalResponse, tasks: &[TaskResponse]) -> GoalStatus {
         return GoalStatus::Done;
     }
 
-    let started = goal.done_amount > 0 || tasks.iter().any(|task| task.status != COLUMN_ID_TODO);
+    // Somebody saying it has started is the plainest evidence there is, and it may come before any of its
+    // tasks moves.
+    let started = goal.started_unix_seconds.is_some()
+        || goal.done_amount > 0
+        || tasks.iter().any(|task| task.status != COLUMN_ID_TODO);
 
     if started {
         GoalStatus::InProgress
@@ -569,22 +584,14 @@ fn RenderHeader(projects: Vec<ProjectResponse>, cs: Signal<ComponentState>) -> E
     let show_closed = cs_ra.show_closed;
     let status_filter = cs_ra.status_filter.clone();
     let view = cs_ra.view;
+    let hide_done = cs_ra.hide_done;
     drop(cs_ra);
 
     // While a status is chosen the tick has nothing left to govern — that choice already decides whether
     // the closed goals are on screen. Drawn dead rather than removed: a control that vanishes when you use
-    // the one beside it is a control people stop trusting. The same on the timeline, where the month is
-    // what decides it.
+    // the one beside it is a control people stop trusting.
     let filtered = GoalStatus::parse(&status_filter).is_some();
     let on_timeline = view == GoalsView::Timeline;
-    let tick_dead = filtered || on_timeline;
-    let tick_hint = if on_timeline {
-        "The timeline shows every goal that was open in its month"
-    } else if filtered {
-        "A chosen status already decides this"
-    } else {
-        ""
-    };
 
     let mut cs = cs;
 
@@ -624,17 +631,31 @@ fn RenderHeader(projects: Vec<ProjectResponse>, cs: Signal<ComponentState>) -> E
                 }
                 // Beside the picker rather than out at the right edge: it says which goals of this board are
                 // on screen, which is the same question the dropdown answers one level up.
-                div {
-                    class: if tick_dead { "checkbox-row disabled" } else { "checkbox-row" },
-                    title: tick_hint,
-                    input {
-                        r#type: "checkbox",
-                        id: "goals-show-closed",
-                        disabled: tick_dead,
-                        checked: show_closed,
-                        onchange: move |event| cs.write().show_closed = event.checked(),
+                //
+                // The timeline has its own answer in the same place: it opens on everything a month held,
+                // done work included — it is the view somebody reads the past in — and Hide done is how
+                // they put the finished goals and tasks away. Kept apart from the list's tick, whose default
+                // is the opposite.
+                if on_timeline {
+                    button {
+                        class: if hide_done { "btn btn-sm toggle active" } else { "btn btn-sm toggle" },
+                        title: if hide_done { "Done goals and tasks are hidden — click to show them" } else { "Hide the goals and the tasks that are done" },
+                        onclick: move |_| cs.write().toggle_hide_done(),
+                        "Hide done"
                     }
-                    label { r#for: "goals-show-closed", "Show done goals" }
+                } else {
+                    div {
+                        class: if filtered { "checkbox-row disabled" } else { "checkbox-row" },
+                        title: if filtered { "A chosen status already decides this" } else { "" },
+                        input {
+                            r#type: "checkbox",
+                            id: "goals-show-closed",
+                            disabled: filtered,
+                            checked: show_closed,
+                            onchange: move |event| cs.write().show_closed = event.checked(),
+                        }
+                        label { r#for: "goals-show-closed", "Show done goals" }
+                    }
                 }
             }
             // At the far edge, away from the filters: it does not narrow what is shown, it changes how.
@@ -924,18 +945,7 @@ fn RenderGoalTask(task: TaskResponse, project: ProjectResponse) -> Element {
         .map(|itm| KindColor::parse_or_default(&itm.color).hex())
         .unwrap_or("");
 
-    // Both anchors exist in every project but are not in `columns`, which holds the middle only — so a task
-    // in Todo or Done would otherwise show a raw id where every other row shows a name.
-    let status_name = match task.status.as_str() {
-        COLUMN_ID_TODO => "Todo".to_string(),
-        COLUMN_ID_DONE => "Done".to_string(),
-        stored => project
-            .columns
-            .iter()
-            .find(|column| column.id == stored)
-            .map(|column| column.name.clone())
-            .unwrap_or_else(|| stored.to_string()),
-    };
+    let status_name = task_status_name(&task.status, &project);
 
     let done = task.status == COLUMN_ID_DONE;
 
@@ -1002,6 +1012,23 @@ fn RenderGoalTask(task: TaskResponse, project: ProjectResponse) -> Element {
     }
 }
 
+/// The name of the column a task is in, as the board shows it.
+///
+/// Both anchors exist in every project but are not in `columns`, which holds the middle only — so a task in
+/// Todo or Done would otherwise show a raw id where every other row shows a name.
+pub(super) fn task_status_name(status: &str, project: &ProjectResponse) -> String {
+    match status {
+        COLUMN_ID_TODO => "Todo".to_string(),
+        COLUMN_ID_DONE => "Done".to_string(),
+        stored => project
+            .columns
+            .iter()
+            .find(|column| column.id == stored)
+            .map(|column| column.name.clone())
+            .unwrap_or_else(|| stored.to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1023,6 +1050,7 @@ mod tests {
             comments: Vec::new(),
             created_unix_seconds: 0,
             updated_unix_seconds: 0,
+            started_unix_seconds: None,
             closed_unix_seconds: None,
             deleted_unix_seconds: None,
         }
@@ -1052,6 +1080,7 @@ mod tests {
             comments: Vec::new(),
             created_unix_seconds: 0,
             updated_unix_seconds: 0,
+            started_unix_seconds: None,
             closed_unix_seconds: None,
             deleted_unix_seconds: None,
         }

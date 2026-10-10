@@ -181,7 +181,11 @@ pub struct GoalView {
     #[property(description = "When the goal itself last changed, unix seconds (UTC). A comment does not move this")]
     pub updated_unix_seconds: i64,
     #[property(
-        description = "When it was closed, unix seconds (UTC), and absent while it is open. A goal closed longer ago than the project's archive window is left out of goals_list unless you ask for it"
+        description = "When work on the goal began, unix seconds (UTC), and absent until it has — the START of the goal on the Goals timeline, as `closed_unix_seconds` is its end. Set with `started_at` on goals_update (or goals_create) when you begin; stamped by itself when the first task under the goal leaves todo"
+    )]
+    pub started_unix_seconds: Option<i64>,
+    #[property(
+        description = "When it was closed, unix seconds (UTC), and absent while it is open — the END of the goal on the Goals timeline. A goal closed longer ago than the project's archive window is left out of goals_list unless you ask for it"
     )]
     pub closed_unix_seconds: Option<i64>,
     #[property(
@@ -216,6 +220,9 @@ impl GoalView {
             comments_amount: goal.comments.len() as i32,
             created_unix_seconds: goal.created.unix_microseconds / 1_000_000,
             updated_unix_seconds: goal.updated.unix_microseconds / 1_000_000,
+            started_unix_seconds: goal
+                .start_moment
+                .map(|itm| itm.unix_microseconds / 1_000_000),
             closed_unix_seconds: goal
                 .close_moment
                 .map(|itm| itm.unix_microseconds / 1_000_000),
@@ -1327,6 +1334,10 @@ pub struct TaskView {
     )]
     pub updated_unix_seconds: i64,
     #[property(
+        description = "When the task left `todo` — when work on it started — unix seconds (UTC). Stamped by the server as the status moves off todo and cleared if it moves back; absent while it is in todo, and on a task that left it before starts were recorded"
+    )]
+    pub started_unix_seconds: Option<i64>,
+    #[property(
         description = "When the task landed in `done`, unix seconds (UTC), and absent whenever it is not there. Work closed more than seven days ago is archived and left out of tasks_list unless you ask for it"
     )]
     pub closed_unix_seconds: Option<i64>,
@@ -1376,6 +1387,9 @@ impl TaskView {
             comments_amount: task.comments.len() as i32,
             created_unix_seconds: task.created.unix_microseconds / 1_000_000,
             updated_unix_seconds: task.updated.unix_microseconds / 1_000_000,
+            started_unix_seconds: task
+                .start_moment
+                .map(|itm| itm.unix_microseconds / 1_000_000),
             closed_unix_seconds: task
                 .close_moment
                 .map(|itm| itm.unix_microseconds / 1_000_000),

@@ -121,6 +121,10 @@ pub struct GoalsCreateInput {
         description = "References to the documents this goal points at, from documents_list. A goal is where a decision is written down, so this is where the specification behind an epic belongs. A reference is a url and names either kind of document: `raw/{project}/document/{id}` for one of the project's own, `raw/{project}/github/{repository}/{path}` for a file in a connected repository — so an existing spec in a repository is attached without copying it in. A bare id or a listing's `path` is accepted too. Every one must be on THIS project — a reference does not cross boards"
     )]
     pub documents: Option<Vec<String>>,
+    #[property(
+        description = "When work on the goal began: `now`, a date like `2026-10-07`, or a date and time like `2026-10-07T14:30:00Z` (a zone offset such as `+03:00` is honoured; no zone means UTC). Pass `now` when you open a goal and start on it at once. Omit while it is still being talked about: set it with goals_update when work begins — and if nobody does, it is stamped by itself when the first task under the goal leaves todo"
+    )]
+    pub started_at: Option<String>,
 }
 
 pub struct GoalsCreateHandler {
@@ -141,7 +145,10 @@ thread with goals_add_comment, and create the tasks under it as they become clea
 \
 Read goals_list first: this creates a goal unconditionally, and two goals for the same outcome split \
 the work in half where a person reads it by eye. A goal always starts open — there is no state to pass, \
-and closing it is goals_update's job, which is where the resolution has to be written.";
+and closing it is goals_update's job, which is where the resolution has to be written.\
+\
+Pass `started_at: now` if work on it begins right away: a goal has a start and an end, and the Goals \
+timeline draws it between the two.";
 }
 
 #[async_trait::async_trait]
@@ -157,6 +164,7 @@ impl McpToolCall<GoalsCreateInput, GoalWriteResponse> for GoalsCreateHandler {
                 priority: model.priority,
                 subtasks: SubtaskInput::into_new(model.subtasks),
                 documents: model.documents.unwrap_or_default(),
+                started_at: model.started_at,
             },
         )
         .await?;
@@ -184,9 +192,17 @@ pub struct GoalsUpdateInput {
     )]
     pub priority: Option<String>,
     #[property(
-        description = "Pass true to CLOSE the goal, which is only allowed once every one of its tasks is `done` and always requires `comment` — the resolution. Pass false to re-open a closed goal. Omit to leave its state alone"
+        description = "Pass true to CLOSE the goal — move it to done — which is only allowed once every one of its tasks is `done` and always requires `comment` — the resolution. Closing stamps the goal's END: now, or `closed_at` if you pass it. Pass false to re-open a closed goal. Omit to leave its state alone"
     )]
     pub close: Option<bool>,
+    #[property(
+        description = "When work on the goal began: `now`, `2026-10-07`, or `2026-10-07T14:30:00Z`. SET IT WHEN YOU START WORKING ON THE GOAL — it is the goal's START on the Goals timeline, as closing is its end. If nobody sets it, it is stamped when the first task under the goal leaves todo, and a goal closed without one is given the earliest start among its tasks. Pass it again to correct it; an empty string clears it. Not in the future"
+    )]
+    pub started_at: Option<String>,
+    #[property(
+        description = "When the goal was closed, for a close that happened before this call: `2026-10-07` or `2026-10-07T14:30:00Z`. Only with `close: true`, or on a goal that is already closed to re-date its close. Omit to close it now, which is the usual case. Not in the future, and not before `started_at`"
+    )]
+    pub closed_at: Option<String>,
     #[property(
         description = "Checklist items to add to the goal, each a `title` and optionally a longer `text`. Added to what it already carries. For the goal's own loose ends — the work belongs in tasks under it"
     )]
@@ -249,8 +265,13 @@ impl GoalsUpdateHandler {
 
 impl ToolDefinition for GoalsUpdateHandler {
     const FUNC_NAME: &'static str = "goals_update";
-    const DESCRIPTION: &'static str = "Rename a goal, rewrite it, or close it. Only the fields you \
-pass change.\
+    const DESCRIPTION: &'static str = "Rename a goal, rewrite it, start it or close it. Only the fields \
+you pass change.\
+\
+A GOAL HAS A START AND AN END, and the Goals timeline draws it between the two. `started_at` is when work \
+on it began: set it when you begin, or it is stamped when the first task under the goal leaves todo. The \
+end is the close — `close: true`, which is moving the goal to done — stamped as you close it, or dated by \
+`closed_at`.\
 \
 CLOSING A GOAL HAS TWO CONDITIONS, and both are enforced. Every task under it must be `done` — the \
 call is refused with the unfinished ones named, and the fix is to land them or take them out of the \
@@ -275,6 +296,8 @@ impl McpToolCall<GoalsUpdateInput, GoalWriteResponse> for GoalsUpdateHandler {
                 color: model.color,
                 priority: model.priority,
                 close: model.close,
+                started_at: model.started_at,
+                closed_at: model.closed_at,
                 subtasks: SubtaskOps {
                     add: model.add_subtasks,
                     edit: model.edit_subtasks,

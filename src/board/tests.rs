@@ -104,6 +104,7 @@ fn task(project_id: &str, number: i64, status: &str, depends_on: &[i64]) -> Task
         comments: Vec::new(),
         created: DateTimeAsMicroseconds::new(0),
         updated: DateTimeAsMicroseconds::new(0),
+        start_moment: None,
         close_moment: None,
         deleted_moment: None,
     }
@@ -124,6 +125,7 @@ fn goal(project_id: &str, number: i64) -> GoalModel {
         comments: Vec::new(),
         created: DateTimeAsMicroseconds::new(0),
         updated: DateTimeAsMicroseconds::new(0),
+        start_moment: None,
         close_moment: None,
         deleted_moment: None,
     }

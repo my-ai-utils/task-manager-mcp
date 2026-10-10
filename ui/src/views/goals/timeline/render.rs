@@ -3,12 +3,16 @@ use std::collections::HashMap;
 use dioxus::prelude::*;
 use task_manager_shared::goals::GoalResponse;
 use task_manager_shared::kind_color::KindColor;
+use task_manager_shared::projects::{COLUMN_ID_DONE, ProjectResponse};
 use task_manager_shared::tasks::TaskResponse;
 
-use super::super::render::GoalStatus;
-use super::actions::{DAY, Lane, Month, date_of, lay_out, wall_clock};
+use super::super::render::{GoalStatus, task_status_name};
+use super::actions::{
+    DAY, GoalLane, Life, Month, Row, Span, TaskLane, date_of, lay_out, wall_clock,
+};
 
-/// The goals of one month as a Gantt chart: a row per goal, a column per day.
+/// The goals of one month as a Gantt chart: a row per goal, a column per day — and under a goal somebody
+/// unfolded, a row per task.
 ///
 /// `month` is `None` for "this month", which is what the screen opens on and what `Today` goes back to —
 /// held as `None` rather than as the month it is now, so a tab left open over midnight on the 31st moves
@@ -17,38 +21,66 @@ use super::actions::{DAY, Lane, Month, date_of, lay_out, wall_clock};
 pub fn RenderTimeline(
     goals: Vec<(GoalResponse, GoalStatus)>,
     of_goal: HashMap<String, Vec<TaskResponse>>,
+    project: ProjectResponse,
     month: Option<Month>,
     wanted: Option<GoalStatus>,
+    expanded: Vec<String>,
+    hide_done: bool,
     on_month: EventHandler<Option<Month>>,
+    on_toggle: EventHandler<String>,
 ) -> Element {
     let now = wall_clock(js_sys::Date::now() as i64 / 1_000);
     let this_month = Month::of(now);
     let shown = month.unwrap_or(this_month);
 
-    let lanes = lay_out(shown, goals, &of_goal, now, &wall_clock);
+    let rows = lay_out(
+        shown,
+        goals,
+        &of_goal,
+        &expanded,
+        hide_done,
+        now,
+        &wall_clock,
+    );
 
     let days = shown.days();
     let today = shown.day_of(now);
 
-    // The template, inline, because the number of columns is the month's and the number of rows is the
-    // data's. Every day the same width, which is what lets a lane's day lines be one repeating gradient.
+    // A goal's row is taller than the rows of its tasks: the tree reads as a tree by its rhythm before
+    // anybody notices the indent.
+    let heights: Vec<&str> = rows
+        .iter()
+        .map(|row| match row {
+            Row::Goal(_) => "var(--gantt-row)",
+            Row::Task(_) | Row::Nothing { .. } => "var(--gantt-task-row)",
+        })
+        .collect();
+
+    // The template, inline, because the number of columns is the month's and the rows are the data's.
+    // Every day the same width, which is what lets a lane's day lines be one repeating gradient.
     let grid_style = format!(
         "grid-template-columns: var(--gantt-label) repeat({days}, minmax(var(--gantt-day), 1fr)); \
-         grid-template-rows: var(--gantt-head) repeat({}, var(--gantt-row));",
-        lanes.len()
+         grid-template-rows: var(--gantt-head) {};",
+        heights.join(" ")
     );
     let lines_style = format!("background-size: calc(100% / {days}) 100%;");
 
-    let empty_note = if lanes.is_empty() {
-        Some(match wanted {
-            Some(status) => format!("No {} goal was open in {}.", status.title(), shown.title()),
-            None => format!("No goal was open in {}.", shown.title()),
-        })
+    let empty_note = if rows.is_empty() {
+        let which = match wanted {
+            Some(status) => format!("No {} goal", status.title()),
+            None => "No goal".to_string(),
+        };
+        let hidden = if hide_done && wanted.is_none() {
+            " Done goals are hidden."
+        } else {
+            ""
+        };
+        Some(format!("{which} was open in {}.{hidden}", shown.title()))
     } else {
         None
     };
 
-    let rows_end = lanes.len() + 2;
+    let rows_end = rows.len() + 2;
 
     rsx! {
         div { class: "gantt-toolbar",
@@ -73,6 +105,14 @@ pub fn RenderTimeline(
             }
 
             div { class: "gantt-legend",
+                span { class: "gantt-legend-item",
+                    span { class: "gantt-legend-wait" }
+                    "waiting to start"
+                }
+                span { class: "gantt-legend-item",
+                    span { class: "gantt-legend-work" }
+                    "in work"
+                }
                 span { class: "gantt-legend-item",
                     span { class: "gantt-release" }
                     "release"
@@ -113,13 +153,15 @@ pub fn RenderTimeline(
                         }
                     }
 
-                    for (row , lane) in lanes.iter().enumerate() {
-                        RenderLane {
-                            key: "{lane.goal.id}",
-                            lane: lane.clone(),
-                            row: row + 2,
+                    for (index , row) in rows.iter().enumerate() {
+                        RenderRow {
+                            key: "{row.key()}",
+                            row: row.clone(),
+                            line: index + 2,
                             lines_style: lines_style.clone(),
-                            month_start: shown.start(),
+                            month: shown,
+                            project: project.clone(),
+                            on_toggle,
                         }
                     }
                 }
@@ -129,133 +171,351 @@ pub fn RenderTimeline(
 }
 
 #[component]
-fn RenderLane(lane: Lane, row: usize, lines_style: String, month_start: i64) -> Element {
-    let goal = &lane.goal;
-    let span = lane.span;
-    let hex = KindColor::parse_or_default(&goal.color).hex();
-    let status = lane.status;
+fn RenderRow(
+    row: Row,
+    line: usize,
+    lines_style: String,
+    month: Month,
+    project: ProjectResponse,
+    on_toggle: EventHandler<String>,
+) -> Element {
+    match row {
+        Row::Goal(lane) => rsx! {
+            RenderGoalLane { lane, line, lines_style, month, on_toggle }
+        },
+        Row::Task(lane) => rsx! {
+            RenderTaskLane { lane, line, lines_style, project }
+        },
+        Row::Nothing { .. } => rsx! {
+            div {
+                class: "gantt-label task nothing",
+                style: "grid-row: {line}; grid-column: 1",
+                "Nothing under this goal in {month.title()}"
+            }
+            div {
+                class: "gantt-lane",
+                style: "grid-row: {line}; grid-column: 2 / -1; {lines_style}",
+            }
+        },
+    }
+}
 
-    let opened = date_of(wall_clock(goal.created_unix_seconds));
-    let until = match goal.closed_unix_seconds {
-        Some(closed) => format!("closed {}", date_of(wall_clock(closed))),
-        None => "still open".to_string(),
-    };
+/// A goal's row. The row is the fold: a click on its name or its bar unfolds its tasks, the way a click
+/// on a goal's head does in the list — and the eye at the end opens the goal itself, as it does there.
+#[component]
+fn RenderGoalLane(
+    lane: GoalLane,
+    line: usize,
+    lines_style: String,
+    month: Month,
+    on_toggle: EventHandler<String>,
+) -> Element {
+    let goal = &lane.goal;
+    let status = lane.status;
+    let hex = KindColor::parse_or_default(&goal.color).hex();
+
     let tooltip = format!(
-        "{} · {}\nOpened {opened}, {until}\n{} / {} tasks done",
-        goal.id, goal.name, goal.done_amount, goal.tasks_amount
+        "{} · {}\n{}\n{} / {} tasks done\nClick to {} its tasks",
+        goal.id,
+        goal.name,
+        life_lines(&lane.life, goal.started_unix_seconds.is_some(), "Closed"),
+        goal.done_amount,
+        goal.tasks_amount,
+        if lane.open { "fold" } else { "unfold" },
     );
 
-    let mut bar_class = "gantt-bar".to_string();
-    if span.cut_before {
-        bar_class.push_str(" cut-before");
-    }
-    if span.cut_after {
-        bar_class.push_str(" cut-after");
-    }
-    if span.ongoing {
-        bar_class.push_str(" ongoing");
-    }
+    let marks = Marks::of(&lane, month);
 
-    // An open goal's bar fades out at today rather than ending square: it stops there because that is as
-    // far as time has got, not because the goal did.
-    let bar_background = if span.ongoing {
-        format!(
-            "background: linear-gradient(90deg, {hex} 0, {hex} calc(100% - 18px), {hex}33 100%)"
+    let waiting = lane.bars.waiting.map(|span| {
+        (
+            stretch_class("gantt-wait", span),
+            format!("grid-row: {line}; {} color: {hex};", columns(span)),
         )
-    } else {
-        format!("background: {hex}")
-    };
+    });
+    let work = lane.bars.work.map(|span| {
+        (
+            span,
+            stretch_class("gantt-bar", span),
+            format!(
+                "grid-row: {line}; {} {}",
+                columns(span),
+                bar_background(span, hex)
+            ),
+        )
+    });
+    let closed_here = lane.life.closed.is_some();
 
-    // The count rides inside the bar only where there is room for it — two days and up.
-    let wide = span.last > span.first;
-    let closed_here = goal.closed_unix_seconds.is_some() && !span.cut_after;
-
-    let date_of_day = |day: u32| date_of(month_start + day as i64 * DAY);
-
-    let done_marks: Vec<(u32, String)> = lane
-        .done
-        .iter()
-        .map(|(day, tasks)| {
-            let what = if tasks.len() == 1 {
-                "1 task".to_string()
-            } else {
-                format!("{} tasks", tasks.len())
-            };
-            (
-                *day,
-                format!("{what} done {}: {}", date_of_day(*day), tasks.join(", ")),
-            )
-        })
-        .collect();
-
-    let release_marks: Vec<(u32, String)> = lane
-        .releases
-        .iter()
-        .map(|(day, titles)| {
-            (
-                *day,
-                format!("Released {}: {}", date_of_day(*day), titles.join(", ")),
-            )
-        })
-        .collect();
-
-    let label_goal = goal.clone();
-    let bar_goal = goal.clone();
+    let for_dialog = goal.clone();
+    let id = goal.id.clone();
+    let toggle = move |_: MouseEvent| on_toggle.call(id.clone());
+    // One per element that folds the row: `rsx!` may build the conditional ones in any order, so none of
+    // them may be the one that moves the original.
+    let (toggle_label, toggle_wait, toggle_bar) = (toggle.clone(), toggle.clone(), toggle);
 
     rsx! {
         div {
-            class: "gantt-label",
-            style: "grid-row: {row}; grid-column: 1",
+            class: "gantt-label goal",
+            style: "grid-row: {line}; grid-column: 1",
             title: "{tooltip}",
-            onclick: move |_| open_goal(&label_goal, status),
+            onclick: toggle_label,
+            span { class: "goal-caret", if lane.open { "▾" } else { "▸" } }
             span { class: "gantt-swatch", style: "background: {hex}" }
             span { class: "goal-id", "{goal.id}" }
             span { class: "gantt-name", "{goal.name}" }
             span { class: "goal-status {status.key()}", title: "{status.hint()}", "{status.title()}" }
+            // `stop_propagation`, because the row around it is the fold: one click, one thing.
+            button {
+                class: "gantt-eye",
+                title: "Read this goal and its comments",
+                onclick: move |event| {
+                    event.stop_propagation();
+                    open_goal(&for_dialog, status);
+                },
+                "👁"
+            }
         }
 
         div {
             class: "gantt-lane",
-            style: "grid-row: {row}; grid-column: 2 / -1; {lines_style}",
+            style: "grid-row: {line}; grid-column: 2 / -1; {lines_style}",
         }
 
-        div {
-            class: "{bar_class}",
-            style: "grid-row: {row}; grid-column: {span.first + 2} / {span.last + 3}; {bar_background}",
-            title: "{tooltip}",
-            onclick: move |_| open_goal(&bar_goal, status),
-            if span.cut_before {
-                span { class: "gantt-bar-cut", "‹" }
-            }
-            if wide {
-                span { class: "gantt-bar-text", "{goal.done_amount} / {goal.tasks_amount}" }
-            }
-            if closed_here {
-                span { class: "gantt-bar-end", "✓" }
-            }
-            if span.cut_after {
-                span { class: "gantt-bar-cut after", "›" }
+        if let Some((class, style)) = waiting {
+            div {
+                class: "{class}",
+                style: "{style}",
+                title: "{tooltip}",
+                onclick: toggle_wait,
             }
         }
 
-        for (day , hint) in done_marks {
+        if let Some((span, class, style)) = work {
+            div {
+                class: "{class}",
+                style: "{style}",
+                title: "{tooltip}",
+                onclick: toggle_bar,
+                if span.cut_before {
+                    span { class: "gantt-bar-cut", "‹" }
+                }
+                // The count rides inside the bar only where there is room for it — two days and up.
+                if span.last > span.first {
+                    span { class: "gantt-bar-text", "{goal.done_amount} / {goal.tasks_amount}" }
+                }
+                if closed_here && !span.cut_after {
+                    span { class: "gantt-bar-end", "✓" }
+                }
+                if span.cut_after {
+                    span { class: "gantt-bar-cut after", "›" }
+                }
+            }
+        }
+
+        for (day , hint) in marks.done {
             div {
                 key: "done-{day}",
                 class: "gantt-mark done",
-                style: "grid-row: {row}; grid-column: {day + 2}",
+                style: "grid-row: {line}; grid-column: {day + 2}",
                 span { class: "gantt-done", title: "{hint}" }
             }
         }
 
-        for (day , hint) in release_marks {
+        for (day , hint) in marks.releases {
             div {
                 key: "release-{day}",
                 class: "gantt-mark release",
-                style: "grid-row: {row}; grid-column: {day + 2}",
+                style: "grid-row: {line}; grid-column: {day + 2}",
                 span { class: "gantt-release", title: "{hint}" }
             }
         }
     }
+}
+
+/// A task's row, under its goal: drawn in the goal's colour, lighter, and opening the task the way its
+/// card does.
+#[component]
+fn RenderTaskLane(
+    lane: TaskLane,
+    line: usize,
+    lines_style: String,
+    project: ProjectResponse,
+) -> Element {
+    let task = &lane.task;
+    let hex = KindColor::parse_or_default(&lane.color).hex();
+    let title = task_manager_shared::task_title::task_title(&task.text);
+    let status_name = task_status_name(&task.status, &project);
+    let done = task.status == COLUMN_ID_DONE;
+
+    let assignee = task
+        .assignee_name
+        .clone()
+        .or_else(|| task.assignee.clone())
+        .unwrap_or_else(|| "Unassigned".to_string());
+
+    let tooltip = format!(
+        "{} · {title}\n{}\nIn {status_name}, {assignee}",
+        task.id,
+        life_lines(&lane.life, task.started_unix_seconds.is_some(), "Done"),
+    );
+
+    let waiting = lane.bars.waiting.map(|span| {
+        (
+            stretch_class("gantt-wait task", span),
+            format!("grid-row: {line}; {} color: {hex};", columns(span)),
+        )
+    });
+    let work = lane.bars.work.map(|span| {
+        (
+            span,
+            stretch_class("gantt-bar task", span),
+            format!(
+                "grid-row: {line}; {} {}",
+                columns(span),
+                bar_background(span, hex)
+            ),
+        )
+    });
+    let closed_here = lane.life.closed.is_some();
+
+    let found = crate::api::find_task_locally(task, &project);
+    let open = move |_: MouseEvent| {
+        crate::dialogs::open(crate::dialogs::DialogState::ViewTask {
+            found: found.clone(),
+        });
+    };
+    let (open_label, open_wait, open_bar) = (open.clone(), open.clone(), open);
+
+    rsx! {
+        div {
+            class: if done { "gantt-label task done" } else { "gantt-label task" },
+            style: "grid-row: {line}; grid-column: 1",
+            title: "{tooltip}",
+            onclick: open_label,
+            span { class: "goal-task-id", "{task.id}" }
+            span { class: "gantt-task-title", "{title}" }
+            span { class: "gantt-task-status", "{status_name}" }
+        }
+
+        div {
+            class: "gantt-lane",
+            style: "grid-row: {line}; grid-column: 2 / -1; {lines_style}",
+        }
+
+        if let Some((class, style)) = waiting {
+            div {
+                class: "{class}",
+                style: "{style}",
+                title: "{tooltip}",
+                onclick: open_wait,
+            }
+        }
+
+        if let Some((span, class, style)) = work {
+            div {
+                class: "{class}",
+                style: "{style}",
+                title: "{tooltip}",
+                onclick: open_bar,
+                if closed_here && !span.cut_after {
+                    span { class: "gantt-bar-end", "✓" }
+                }
+            }
+        }
+    }
+}
+
+/// The day marks on a goal's row, with what each says on hover.
+struct Marks {
+    done: Vec<(u32, String)>,
+    releases: Vec<(u32, String)>,
+}
+
+impl Marks {
+    fn of(lane: &GoalLane, month: Month) -> Self {
+        let date_of_day = |day: u32| date_of(month.start() + day as i64 * DAY);
+
+        let done = lane
+            .done
+            .iter()
+            .map(|(day, tasks)| {
+                let what = if tasks.len() == 1 {
+                    "1 task".to_string()
+                } else {
+                    format!("{} tasks", tasks.len())
+                };
+                (
+                    *day,
+                    format!("{what} done {}: {}", date_of_day(*day), tasks.join(", ")),
+                )
+            })
+            .collect();
+
+        let releases = lane
+            .releases
+            .iter()
+            .map(|(day, titles)| {
+                (
+                    *day,
+                    format!("Released {}: {}", date_of_day(*day), titles.join(", ")),
+                )
+            })
+            .collect();
+
+        Self { done, releases }
+    }
+}
+
+/// Where a stretch sits: the days it covers, as grid columns. The first column is the names.
+fn columns(span: Span) -> String {
+    format!("grid-column: {} / {};", span.first + 2, span.last + 3)
+}
+
+/// A stretch's classes: what it is, and which of its ends are cut by the edges of the month.
+fn stretch_class(base: &str, span: Span) -> String {
+    let mut class = base.to_string();
+
+    if span.cut_before {
+        class.push_str(" cut-before");
+    }
+    if span.cut_after {
+        class.push_str(" cut-after");
+    }
+    if span.ongoing {
+        class.push_str(" ongoing");
+    }
+
+    class
+}
+
+/// What is under way fades out at today rather than ending square: it stops there because that is as far
+/// as time has got, not because the work did.
+fn bar_background(span: Span, hex: &str) -> String {
+    if span.ongoing {
+        format!(
+            "background: linear-gradient(90deg, {hex} 0, {hex} calc(100% - 18px), {hex}33 100%);"
+        )
+    } else {
+        format!("background: {hex};")
+    }
+}
+
+/// The three moments of a life, as the tooltips say them. `start_on_record` tells a start somebody
+/// recorded from one the chart supplied — see `goal_life`.
+fn life_lines(life: &Life, start_on_record: bool, closed_word: &str) -> String {
+    let opened = format!("Opened {}", date_of(life.opened));
+
+    let started = match life.started {
+        Some(started) if start_on_record => format!("Started {}", date_of(started)),
+        Some(_) => "Start not recorded — drawn from when it was opened".to_string(),
+        None => "Not started yet".to_string(),
+    };
+
+    let closed = match life.closed {
+        Some(closed) => format!("{closed_word} {}", date_of(closed)),
+        None => "Still open".to_string(),
+    };
+
+    format!("{opened}\n{started}\n{closed}")
 }
 
 fn open_goal(goal: &GoalResponse, status: GoalStatus) {

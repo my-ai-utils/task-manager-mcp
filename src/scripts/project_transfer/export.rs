@@ -416,6 +416,7 @@ pub(super) fn goal_to_file(project: &ProjectModel, goal: &GoalModel) -> GoalFile
             .collect(),
         created: encode_moment(goal.created),
         updated: encode_moment(goal.updated),
+        started: goal.start_moment.map(encode_moment),
         closed: goal.close_moment.map(encode_moment),
         deleted: goal.deleted_moment.map(encode_moment),
     }
@@ -455,6 +456,7 @@ fn task_to_file(project: &ProjectModel, task: &TaskModel) -> TaskFileModel {
             .collect(),
         created: encode_moment(task.created),
         updated: encode_moment(task.updated),
+        started: task.start_moment.map(encode_moment),
         closed: task.close_moment.map(encode_moment),
         deleted: task.deleted_moment.map(encode_moment),
     }

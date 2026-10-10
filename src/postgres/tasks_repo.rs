@@ -144,6 +144,10 @@ pub struct TaskDto {
     pub created: DateTimeAsMicroseconds,
     #[sql_type("timestamp")]
     pub updated: DateTimeAsMicroseconds,
+    // When the task left Todo; NULL while it is there — see `TaskModel::start_moment`. Nullable because
+    // the column arrives on a populated table, where every task written before it reads as "not recorded".
+    #[sql_type("timestamp")]
+    pub start_moment: Option<DateTimeAsMicroseconds>,
     // When the task landed in Done; NULL whenever it is not there. Nullable rather than defaulted,
     // because "never closed" and "closed at the epoch" are different facts and only one of them is true
     // of a task in Todo.

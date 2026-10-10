@@ -785,6 +785,7 @@ fn build_goal(
         comments: comments.remove(&handle).unwrap_or_default(),
         created: decode_moment(&src.created, "a goal's created")?,
         updated: decode_moment(&src.updated, "a goal's updated")?,
+        start_moment: decode_optional_moment(src.started.as_deref(), "a goal's started")?,
         close_moment: decode_optional_moment(src.closed.as_deref(), "a goal's closed")?,
         deleted_moment: decode_optional_moment(src.deleted.as_deref(), "a goal's deleted")?,
     })
@@ -1042,6 +1043,7 @@ fn build_task(
         comments: comments.remove(&handle).unwrap_or_default(),
         created: decode_moment(&src.created, "a task's created")?,
         updated: decode_moment(&src.updated, "a task's updated")?,
+        start_moment: decode_optional_moment(src.started.as_deref(), "a task's started")?,
         close_moment: decode_optional_moment(src.closed.as_deref(), "a task's closed")?,
         deleted_moment: decode_optional_moment(src.deleted.as_deref(), "a task's deleted")?,
     })
@@ -1480,6 +1482,7 @@ mod tests {
                 }],
                 created: "2026-08-01T09:00:00.000000Z".to_string(),
                 updated: "2026-08-05T09:00:00.000000Z".to_string(),
+                started: Some("2026-08-02T09:00:00.000000Z".to_string()),
                 closed: None,
                 deleted: None,
             }],
@@ -2046,6 +2049,7 @@ mod tests {
             comments: Vec::new(),
             created: moment("2026-08-01T09:00:00.000000Z"),
             updated: moment("2026-08-05T09:00:00.000000Z"),
+            start_moment: Some(moment("2026-08-02T09:00:00.000000Z")),
             close_moment: None,
             deleted_moment: None,
         }
@@ -2075,6 +2079,7 @@ mod tests {
             gh_actions: Vec::new(),
             created: "2026-08-01T09:00:00.000000Z".to_string(),
             updated: "2026-08-05T09:00:00.000000Z".to_string(),
+            started: Some("2026-08-03T09:00:00.000000Z".to_string()),
             closed: Some("2026-08-05T09:00:00.000000Z".to_string()),
             deleted: None,
         }
@@ -2174,6 +2179,11 @@ mod tests {
         assert_eq!(task.labels, vec!["backend".to_string()]);
         assert_eq!(task.created.to_rfc3339_utc(), "2026-08-01T09:00:00.000000Z");
         assert_eq!(task.updated.to_rfc3339_utc(), "2026-08-05T09:00:00.000000Z");
+        assert_eq!(
+            task.start_moment.map(|itm| itm.to_rfc3339_utc()),
+            Some("2026-08-03T09:00:00.000000Z".to_string()),
+            "when work began travels with the task, like when it closed"
+        );
         assert_eq!(
             task.close_moment.map(|itm| itm.to_rfc3339_utc()),
             Some("2026-08-05T09:00:00.000000Z".to_string())

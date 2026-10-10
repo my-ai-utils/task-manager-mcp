@@ -45,6 +45,9 @@ pub struct GoalsRecord {
     /// [`GoalsView::key`].
     #[serde(default)]
     pub view: String,
+    /// Whether the timeline leaves out what is done — see [`ComponentState::hide_done`].
+    #[serde(default)]
+    pub hide_done: bool,
 }
 
 #[derive(Default)]
@@ -67,6 +70,9 @@ pub struct ComponentState {
     pub picking_color: Option<String>,
     /// List or timeline. Remembered by this browser — see [`GoalsRecord`].
     pub view: GoalsView,
+    /// Whether the timeline leaves out the goals and the tasks that are done. Off by default — the timeline
+    /// is where the past is read — and remembered, like the view.
+    pub hide_done: bool,
     /// The month the timeline shows — `None` for the current one, which is what it opens on and what
     /// `Today` goes back to. Not reset by `select`: comparing two boards over the same month is the point.
     pub month: Option<Month>,
@@ -86,9 +92,15 @@ impl ComponentState {
 
         Self {
             view: GoalsView::parse(&record.view),
+            hide_done: record.hide_done,
             stored,
             ..Default::default()
         }
+    }
+
+    pub fn toggle_hide_done(&mut self) {
+        self.hide_done = !self.hide_done;
+        self.persist();
     }
 
     pub fn set_view(&mut self, view: GoalsView) {
@@ -127,6 +139,7 @@ impl ComponentState {
     fn to_record(&self) -> GoalsRecord {
         GoalsRecord {
             view: self.view.key().to_string(),
+            hide_done: self.hide_done,
         }
     }
 
@@ -168,6 +181,21 @@ mod tests {
         state.show_month(None);
 
         assert_eq!(crate::web::storage::storage_writes(), writes);
+    }
+
+    #[test]
+    fn hide_done_is_remembered_with_the_view() {
+        let mut state = ComponentState::new();
+        assert!(
+            !state.hide_done,
+            "the timeline opens on everything, done work included"
+        );
+
+        state.toggle_hide_done();
+        assert!(ComponentState::new().hide_done);
+
+        state.toggle_hide_done();
+        assert!(!ComponentState::new().hide_done);
     }
 
     #[test]
