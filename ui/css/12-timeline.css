@@ -1,0 +1,304 @@
+/* The Goals screen's second view: a bar per goal over the days of one month.
+   One CSS grid for the whole chart — the goal names in the first column, a column per day after it — so a
+   bar is placed by naming the days it covers, and the header, the stripes and the bars cannot drift out of
+   line with each other. The number of columns and rows comes inline from the component. */
+
+/* The switch between the two views, at the right end of the page header. */
+.view-switch {
+  display: flex;
+  margin-left: auto;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.view-switch button {
+  font: inherit;
+  font-size: 13px;
+  border: none;
+  background: var(--surface);
+  color: var(--text-muted);
+  padding: 5px 12px;
+  cursor: pointer;
+}
+
+.view-switch button + button {
+  border-left: 1px solid var(--border-strong);
+}
+
+.view-switch button:hover {
+  background: var(--surface-2);
+}
+
+.view-switch button.active {
+  background: var(--accent);
+  color: #fff;
+}
+
+.gantt-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+
+.gantt-month {
+  font-weight: 600;
+  font-size: 15px;
+  min-width: 140px;
+  text-align: center;
+}
+
+.gantt-legend {
+  display: flex;
+  gap: 14px;
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.gantt-legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Scrolls sideways on a window too narrow for a month; the names stay put — see `.gantt-label`. */
+.gantt {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+  overflow-x: auto;
+}
+
+.gantt-grid {
+  --gantt-label: minmax(220px, 300px);
+  --gantt-day: 26px;
+  --gantt-head: 44px;
+  --gantt-row: 36px;
+  display: grid;
+  min-width: max-content;
+  width: 100%;
+}
+
+.gantt-corner,
+.gantt-label {
+  position: sticky;
+  left: 0;
+  z-index: 5;
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+}
+
+.gantt-corner {
+  display: flex;
+  align-items: flex-end;
+  padding: 0 12px 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-faint);
+  border-bottom: 1px solid var(--border);
+}
+
+/* The day lines: one 1px rule at the start of every day, as a repeating background — the size of one day
+   comes inline, since how many days there are is the month's. */
+.gantt-head-lines,
+.gantt-lane {
+  background-image: linear-gradient(to right, var(--border) 1px, transparent 1px);
+  background-repeat: repeat-x;
+}
+
+.gantt-head-lines {
+  border-bottom: 1px solid var(--border);
+}
+
+.gantt-day {
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-end;
+  padding-bottom: 5px;
+  line-height: 1.1;
+}
+
+.gantt-day-number {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.gantt-day-name {
+  font-size: 10px;
+  color: var(--text-faint);
+}
+
+.gantt-day.weekend .gantt-day-number {
+  color: var(--text-faint);
+}
+
+.gantt-day.today .gantt-day-number {
+  background: var(--accent);
+  color: #fff;
+  border-radius: 9px;
+  padding: 1px 5px;
+  font-weight: 600;
+}
+
+/* Under the lanes: a weekend is shaded, today is tinted and ruled down its middle. */
+.gantt-stripe {
+  background: rgba(9, 30, 66, 0.035);
+}
+
+.gantt-stripe.today {
+  background:
+    linear-gradient(var(--accent), var(--accent)) center / 2px 100% no-repeat,
+    rgba(13, 110, 253, 0.06);
+}
+
+.gantt-lane {
+  border-bottom: 1px solid var(--border);
+}
+
+.gantt-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  min-width: 0;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border);
+}
+
+.gantt-label:hover {
+  background: var(--surface-2);
+}
+
+.gantt-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  flex-shrink: 0;
+}
+
+.gantt-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.gantt-label .goal-status {
+  font-size: 10px;
+  padding: 0 6px;
+}
+
+.gantt-bar {
+  z-index: 2;
+  align-self: center;
+  height: 20px;
+  margin: 0 2px;
+  border-radius: 5px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px;
+  min-width: 0;
+  overflow: hidden;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  text-shadow: 0 1px 1px rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+  box-shadow: var(--shadow-card);
+}
+
+.gantt-bar:hover {
+  filter: brightness(1.08);
+  box-shadow: var(--shadow-raised);
+}
+
+/* A bar that runs in from the month before, or on into the next, ends square at the edge of the grid. */
+.gantt-bar.cut-before {
+  margin-left: 0;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+}
+
+.gantt-bar.cut-after {
+  margin-right: 0;
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.gantt-bar-text {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gantt-bar-end,
+.gantt-bar-cut.after {
+  margin-left: auto;
+}
+
+.gantt-bar-cut {
+  opacity: 0.85;
+}
+
+/* A day's marks sit over the bar, centred in the day's column. The cell lets clicks through to the bar
+   under it, which opens the goal; only the mark itself takes the pointer, for its tooltip. */
+.gantt-mark {
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.gantt-mark > span {
+  pointer-events: auto;
+}
+
+/* Both kinds sit on an EDGE of the bar rather than across its middle, where the count is written: a task
+   done on the bottom edge, a release on the top. The bar is 20px in a 36px row, so its edges are 8px in
+   from the top and the bottom. */
+.gantt-mark.done {
+  align-items: flex-end;
+  padding-bottom: 4px;
+}
+
+.gantt-mark.release {
+  z-index: 4;
+  align-items: flex-start;
+  padding-top: 3px;
+}
+
+/* A task done that day: a small white dot, ringed so it reads on any bar colour and off the bar too. */
+.gantt-done {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #fff;
+  border: 1.5px solid var(--text);
+}
+
+/* A release that day: a dark diamond sitting on the top edge of the bar. */
+.gantt-release {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  background: var(--text);
+  border: 1.5px solid #fff;
+  transform: rotate(45deg);
+}
+
+.gantt-legend .gantt-release {
+  border-color: var(--surface);
+}

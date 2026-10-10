@@ -1,13 +1,16 @@
 use std::collections::HashMap;
 
 use dioxus::prelude::*;
-use dioxus_utils::{DataState, RenderState};
+use dioxus_utils::RenderState;
 use task_manager_shared::goals::GoalResponse;
 use task_manager_shared::kind_color::KindColor;
 use task_manager_shared::projects::{COLUMN_ID_DONE, COLUMN_ID_TODO, ProjectResponse};
 use task_manager_shared::tasks::TaskResponse;
 
 use crate::states::AppState;
+
+use super::state::{ComponentState, GoalsView};
+use super::timeline::{Month, RenderTimeline, merge_with_archive};
 
 /// The same work as Home, seen from the other end.
 ///
@@ -18,7 +21,7 @@ use crate::states::AppState;
 pub fn RenderGoals() -> Element {
     let app_state = consume_context::<Signal<AppState>>();
 
-    let mut cs = use_signal(ComponentState::default);
+    let mut cs = use_signal(ComponentState::new);
 
     // A push carries the goals and the project's WHOLE task list — archived work included — so this screen
     // is served entirely from it: nothing is requested, nothing is emptied first, and an expanded goal keeps
@@ -142,11 +145,60 @@ pub fn RenderGoals() -> Element {
         }
     }
 
+    let wanted = GoalStatus::parse(&status_filter);
+
+    // The other way of looking at the same goals: as bars over a month. It draws closed goals from any
+    // month somebody scrolls back to, which the live list stops carrying once they age off — so this view,
+    // and only this one, also reads the history.
+    if cs_ra.view == GoalsView::Timeline {
+        let archive: Vec<GoalResponse> = match get_archive(cs, &cs_ra) {
+            Ok(archive) => archive.to_vec(),
+            Err(element) => {
+                return rsx! {
+                    div { class: "goals-page",
+                        {header}
+                        {element}
+                    }
+                };
+            }
+        };
+
+        // The same status the list's badge shows, and the same filter on it. The tick has nothing to
+        // govern here — the month decides which goals are on screen — see `RenderHeader`.
+        let on_timeline: Vec<(GoalResponse, GoalStatus)> = merge_with_archive(goals, &archive)
+            .into_iter()
+            .map(|goal| {
+                let under = of_goal
+                    .get(&goal.id)
+                    .map(|itm| itm.as_slice())
+                    .unwrap_or(&[]);
+                let status = goal_status(&goal, under);
+                (goal, status)
+            })
+            .filter(|(_, status)| wanted.is_none_or(|wanted| *status == wanted))
+            .collect();
+
+        let month = cs_ra.month;
+        drop(cs_ra);
+
+        return rsx! {
+            div { class: "goals-page",
+                {header}
+                RenderTimeline {
+                    goals: on_timeline,
+                    of_goal,
+                    month,
+                    wanted,
+                    on_month: move |month: Option<Month>| cs.write().show_month(month),
+                }
+            }
+        };
+    }
+
     // Each goal's status, worked out ONCE and carried to the row that draws it. The filter below asks the
     // same question the badge answers, and two derivations of one fact is how the two come to disagree —
     // which is also why it happens here, after the tasks are grouped, rather than up where the goals
     // arrive: a goal's status is a statement about its tasks.
-    let wanted = GoalStatus::parse(&status_filter);
 
     let with_status: Vec<(GoalResponse, GoalStatus)> = goals
         .into_iter()
@@ -250,50 +302,6 @@ pub fn RenderGoals() -> Element {
 /// handle always contains a `-`.
 const BACKLOG: &str = "backlog";
 
-#[derive(Default)]
-struct ComponentState {
-    projects: DataState<Vec<ProjectResponse>>,
-    /// Which board is on screen, by PREFIX — the same vocabulary Home holds and the api speaks.
-    selected: String,
-    goals: DataState<Vec<GoalResponse>>,
-    tasks: DataState<Vec<TaskResponse>>,
-    /// Which groups are open. Kept across a repaint, so a push does not fold up what somebody was reading.
-    expanded: Vec<String>,
-    /// Whether closed goals are drawn. Off by default — what somebody opens this screen for is the work in
-    /// flight. Deliberately NOT reset by `select`: it is how this reader wants goals shown, not something
-    /// about one board.
-    show_closed: bool,
-    /// Which status is being looked at, by [`GoalStatus::key`] — empty for all of them. A preference of the
-    /// reader's, like `show_closed`, so switching boards does not silently widen what is on screen.
-    status_filter: String,
-    /// Which goal's palette is open, if any. One at a time: two open palettes ask a question nobody asked.
-    picking_color: Option<String>,
-}
-
-impl ComponentState {
-    fn select(&mut self, prefix: String) {
-        if self.selected == prefix {
-            return;
-        }
-
-        self.selected = prefix;
-        // Reset rather than clear: the next render sees `None` and loads, which is the same path a first
-        // visit takes. See `get_goals`.
-        self.goals.reset();
-        self.tasks.reset();
-        self.expanded.clear();
-        self.picking_color = None;
-    }
-
-    fn toggle(&mut self, key: &str) {
-        if let Some(at) = self.expanded.iter().position(|itm| itm == key) {
-            self.expanded.remove(at);
-        } else {
-            self.expanded.push(key.to_string());
-        }
-    }
-}
-
 fn get_projects(
     mut cs: Signal<ComponentState>,
     cs_ra: &ComponentState,
@@ -372,6 +380,36 @@ fn get_goals(
                 match crate::api::get_goals(&project, false).await {
                     Ok(response) => cs.write().goals.set_loaded(response.goals),
                     Err(err) => cs.write().goals.set_error(err.message),
+                }
+            });
+
+            Err(render_loading())
+        }
+        RenderState::Loading => Err(render_loading()),
+        RenderState::Loaded(goals) => Ok(goals.as_slice()),
+        RenderState::Error(err) => Err(render_error(err)),
+    }
+}
+
+/// The board's whole history of goals, for the timeline — see `ComponentState::archive`.
+fn get_archive(
+    mut cs: Signal<ComponentState>,
+    cs_ra: &ComponentState,
+) -> Result<&[GoalResponse], Element> {
+    if cs_ra.selected.is_empty() {
+        return Ok(&[]);
+    }
+
+    match cs_ra.archive.as_ref() {
+        RenderState::None => {
+            let project = cs_ra.selected.clone();
+
+            spawn(async move {
+                cs.write().archive.set_loading();
+
+                match crate::api::get_goals(&project, true).await {
+                    Ok(response) => cs.write().archive.set_loaded(response.goals),
+                    Err(err) => cs.write().archive.set_error(err.message),
                 }
             });
 
@@ -466,8 +504,8 @@ pub fn find_goal_with_status(
 }
 
 /// The three states [`goal_status`] can report, and how each is drawn.
-#[derive(Clone, Copy, PartialEq)]
-enum GoalStatus {
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub(super) enum GoalStatus {
     Todo,
     InProgress,
     Done,
@@ -479,11 +517,11 @@ impl GoalStatus {
 
     /// Back from a [`Self::key`]. Anything else is "any status" — an empty box and a filter naming
     /// something that no longer exists are the same screen, and neither is worth an error.
-    fn parse(key: &str) -> Option<Self> {
+    pub(super) fn parse(key: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|itm| itm.key() == key)
     }
 
-    fn title(self) -> &'static str {
+    pub(super) fn title(self) -> &'static str {
         match self {
             Self::Todo => "Todo",
             Self::InProgress => "In Progress",
@@ -494,7 +532,7 @@ impl GoalStatus {
     /// The one name this status is known by outside its own type: the modifier beside `goal-status` in
     /// the stylesheet, and the value of the option in the header's filter. One vocabulary, so a colour and
     /// a filter cannot drift apart.
-    fn key(self) -> &'static str {
+    pub(super) fn key(self) -> &'static str {
         match self {
             Self::Todo => "todo",
             Self::InProgress => "progress",
@@ -503,7 +541,7 @@ impl GoalStatus {
     }
 
     /// What the badge says on hover, which is the half a one-word label cannot carry.
-    fn hint(self) -> &'static str {
+    pub(super) fn hint(self) -> &'static str {
         match self {
             Self::Todo => "Nothing under this goal has been started yet",
             Self::InProgress => "Work under this goal has started",
@@ -530,12 +568,23 @@ fn RenderHeader(projects: Vec<ProjectResponse>, cs: Signal<ComponentState>) -> E
     let selected_prefix = cs_ra.selected.clone();
     let show_closed = cs_ra.show_closed;
     let status_filter = cs_ra.status_filter.clone();
+    let view = cs_ra.view;
     drop(cs_ra);
 
     // While a status is chosen the tick has nothing left to govern — that choice already decides whether
     // the closed goals are on screen. Drawn dead rather than removed: a control that vanishes when you use
-    // the one beside it is a control people stop trusting.
+    // the one beside it is a control people stop trusting. The same on the timeline, where the month is
+    // what decides it.
     let filtered = GoalStatus::parse(&status_filter).is_some();
+    let on_timeline = view == GoalsView::Timeline;
+    let tick_dead = filtered || on_timeline;
+    let tick_hint = if on_timeline {
+        "The timeline shows every goal that was open in its month"
+    } else if filtered {
+        "A chosen status already decides this"
+    } else {
+        ""
+    };
 
     let mut cs = cs;
 
@@ -576,16 +625,30 @@ fn RenderHeader(projects: Vec<ProjectResponse>, cs: Signal<ComponentState>) -> E
                 // Beside the picker rather than out at the right edge: it says which goals of this board are
                 // on screen, which is the same question the dropdown answers one level up.
                 div {
-                    class: if filtered { "checkbox-row disabled" } else { "checkbox-row" },
-                    title: if filtered { "A chosen status already decides this" } else { "" },
+                    class: if tick_dead { "checkbox-row disabled" } else { "checkbox-row" },
+                    title: tick_hint,
                     input {
                         r#type: "checkbox",
                         id: "goals-show-closed",
-                        disabled: filtered,
+                        disabled: tick_dead,
                         checked: show_closed,
                         onchange: move |event| cs.write().show_closed = event.checked(),
                     }
                     label { r#for: "goals-show-closed", "Show done goals" }
+                }
+            }
+            // At the far edge, away from the filters: it does not narrow what is shown, it changes how.
+            div { class: "view-switch",
+                for option in [GoalsView::List, GoalsView::Timeline] {
+                    button {
+                        key: "{option.key()}",
+                        class: if option == view { "active" } else { "" },
+                        onclick: move |_| cs.write().set_view(option),
+                        match option {
+                            GoalsView::List => "List",
+                            GoalsView::Timeline => "Timeline",
+                        }
+                    }
                 }
             }
         }
