@@ -23,7 +23,7 @@
 # client's own container used to publish, is free again.
 services:
   task-manager-mcp:
-    image: ghcr.io/my-ai-utils/task-manager:0.2.1
+    image: ghcr.io/my-ai-utils/task-manager:0.2.2
     hostname: task-manager-mcp
     container_name: task-manager-mcp
     restart: always
