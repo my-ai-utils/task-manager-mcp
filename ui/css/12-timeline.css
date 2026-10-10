@@ -74,6 +74,9 @@
 }
 
 .gantt-grid {
+  /* The weekend's red: `--danger`'s hue, the text softened and the column fill barely there. */
+  --weekend: rgba(220, 53, 69, 0.8);
+  --weekend-tint: rgba(220, 53, 69, 0.06);
   --gantt-label: minmax(260px, 340px);
   --gantt-day: 26px;
   --gantt-head: 44px;
@@ -136,8 +139,16 @@
   color: var(--text-faint);
 }
 
-.gantt-day.weekend .gantt-day-number {
-  color: var(--text-faint);
+/* Saturday and Sunday are a shade of red, in the head and all the way down — `--weekend` and
+   `--weekend-tint`, set on `.gantt-grid`. Red rather than grey because a calendar is read that way: the
+   weekend is found by colour before anybody reads a letter. */
+.gantt-day.weekend {
+  background: var(--weekend-tint);
+}
+
+.gantt-day.weekend .gantt-day-number,
+.gantt-day.weekend .gantt-day-name {
+  color: var(--weekend);
 }
 
 .gantt-day.today .gantt-day-number {
@@ -148,9 +159,9 @@
   font-weight: 600;
 }
 
-/* Under the lanes: a weekend is shaded, today is tinted and ruled down its middle. */
+/* Under the lanes: a weekend is tinted red, today is tinted blue and ruled down its middle. */
 .gantt-stripe {
-  background: rgba(9, 30, 66, 0.035);
+  background: var(--weekend-tint);
 }
 
 .gantt-stripe.today {
