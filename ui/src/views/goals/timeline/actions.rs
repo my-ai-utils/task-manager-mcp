@@ -371,10 +371,11 @@ impl Row {
     }
 }
 
-/// Where a row sorts: what has dates first, in the order it started, and what has none after it, in the
-/// order it was opened. The waterfall a timeline is read as.
+/// Where a row sorts: what has a start on record first, in the order it started — the waterfall a timeline
+/// is read as — and everything with no start at the bottom, in the order it was opened. Finished work with
+/// no start on record goes there too: its bar begins at the opening, which is not a start anybody gave.
 fn waterfall(life: &Life, id: &str) -> (bool, i64, String) {
-    (life.tentative(), life.started, id.to_string())
+    (!life.start_on_record, life.started, id.to_string())
 }
 
 /// The rows of one month: each goal that has anything to draw in it, and under each unfolded one, its tasks
@@ -814,6 +815,7 @@ mod tests {
         early.started_unix_seconds = Some(OCT_7);
 
         let waiting = goal("RMS-G4", OCT_7 - 30 * DAY, None);
+        let closed_with_no_start = goal("RMS-G6", OCT_7 - 2 * DAY, Some(OCT_7 + 2 * DAY));
         let elsewhere = goal("RMS-G3", OCT_7 - 60 * DAY, Some(OCT_7 - 50 * DAY));
 
         let mut closed_task = task(
@@ -831,6 +833,7 @@ mod tests {
             vec![
                 (late, GoalStatus::InProgress),
                 (waiting, GoalStatus::Todo),
+                (closed_with_no_start, GoalStatus::Done),
                 (early, GoalStatus::Done),
                 (elsewhere, GoalStatus::Done),
             ],
@@ -844,8 +847,8 @@ mod tests {
         let keys: Vec<String> = rows.iter().map(Row::key).collect();
         assert_eq!(
             keys,
-            ["RMS-G2", "RMS-G1", "RMS-G4"],
-            "in the order work began, what has no dates last, and a goal of another month not at all"
+            ["RMS-G2", "RMS-G1", "RMS-G4", "RMS-G6"],
+            "in the order work began; with no start at the bottom, in the order opened — closed or not; and a goal of another month not at all"
         );
 
         let Row::Goal(marked) = &rows[1] else {
