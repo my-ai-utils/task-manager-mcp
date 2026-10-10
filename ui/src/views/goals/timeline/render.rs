@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use dioxus::prelude::*;
 use task_manager_shared::goals::GoalResponse;
 use task_manager_shared::kind_color::KindColor;
-use task_manager_shared::projects::{COLUMN_ID_DONE, ProjectResponse};
+use task_manager_shared::projects::{COLUMN_ID_DONE, COLUMN_ID_TODO, ProjectResponse};
 use task_manager_shared::tasks::TaskResponse;
 
 use super::super::render::{GoalStatus, task_status_name};
@@ -107,11 +107,15 @@ pub fn RenderTimeline(
             div { class: "gantt-legend",
                 span { class: "gantt-legend-item",
                     span { class: "gantt-legend-wait" }
-                    "waiting to start"
+                    "waiting"
                 }
                 span { class: "gantt-legend-item",
                     span { class: "gantt-legend-work" }
                     "in work"
+                }
+                span { class: "gantt-legend-item",
+                    span { class: "gantt-legend-tentative" }
+                    "no start or end set"
                 }
                 span { class: "gantt-legend-item",
                     span { class: "gantt-release" }
@@ -218,7 +222,7 @@ fn RenderGoalLane(
         "{} · {}\n{}\n{} / {} tasks done\nClick to {} its tasks",
         goal.id,
         goal.name,
-        life_lines(&lane.life, goal.started_unix_seconds.is_some(), "Closed"),
+        life_lines(&lane.life, "Closed", status == GoalStatus::Todo),
         goal.done_amount,
         goal.tasks_amount,
         if lane.open { "fold" } else { "unfold" },
@@ -235,11 +239,11 @@ fn RenderGoalLane(
     let work = lane.bars.work.map(|span| {
         (
             span,
-            stretch_class("gantt-bar", span),
+            stretch_class(&bar_kind("gantt-bar", lane.bars.tentative), span),
             format!(
                 "grid-row: {line}; {} {}",
                 columns(span),
-                bar_background(span, hex)
+                bar_background(span, hex, lane.bars.tentative)
             ),
         )
     });
@@ -355,7 +359,7 @@ fn RenderTaskLane(
     let tooltip = format!(
         "{} · {title}\n{}\nIn {status_name}, {assignee}",
         task.id,
-        life_lines(&lane.life, task.started_unix_seconds.is_some(), "Done"),
+        life_lines(&lane.life, "Done", task.status == COLUMN_ID_TODO),
     );
 
     let waiting = lane.bars.waiting.map(|span| {
@@ -367,11 +371,11 @@ fn RenderTaskLane(
     let work = lane.bars.work.map(|span| {
         (
             span,
-            stretch_class("gantt-bar task", span),
+            stretch_class(&bar_kind("gantt-bar task", lane.bars.tentative), span),
             format!(
                 "grid-row: {line}; {} {}",
                 columns(span),
-                bar_background(span, hex)
+                bar_background(span, hex, lane.bars.tentative)
             ),
         )
     });
@@ -487,10 +491,22 @@ fn stretch_class(base: &str, span: Span) -> String {
     class
 }
 
+/// A bar's classes before the cuts: what it is, and whether it is a guess — see `Life::tentative`.
+fn bar_kind(base: &str, tentative: bool) -> String {
+    if tentative {
+        format!("{base} tentative")
+    } else {
+        base.to_string()
+    }
+}
+
 /// What is under way fades out at today rather than ending square: it stops there because that is as far
-/// as time has got, not because the work did.
-fn bar_background(span: Span, hex: &str) -> String {
-    if span.ongoing {
+/// as time has got, not because the work did. A guess is drawn see-through inside a dashed edge of the same
+/// colour — visible, and plainly not a record.
+fn bar_background(span: Span, hex: &str, tentative: bool) -> String {
+    if tentative {
+        format!("background: {hex}73; border-color: {hex};")
+    } else if span.ongoing {
         format!(
             "background: linear-gradient(90deg, {hex} 0, {hex} calc(100% - 18px), {hex}33 100%);"
         )
@@ -499,15 +515,20 @@ fn bar_background(span: Span, hex: &str) -> String {
     }
 }
 
-/// The three moments of a life, as the tooltips say them. `start_on_record` tells a start somebody
-/// recorded from one the chart supplied — see `goal_life`.
-fn life_lines(life: &Life, start_on_record: bool, closed_word: &str) -> String {
+/// The three moments of a life, as the tooltips say them — including which kind of missing start a bar
+/// with none on record is: not started at all (`in_todo`), started without anybody saying when, or finished
+/// before starts were recorded.
+fn life_lines(life: &Life, closed_word: &str, in_todo: bool) -> String {
     let opened = format!("Opened {}", date_of(life.opened));
 
-    let started = match life.started {
-        Some(started) if start_on_record => format!("Started {}", date_of(started)),
-        Some(_) => "Start not recorded — drawn from when it was opened".to_string(),
-        None => "Not started yet".to_string(),
+    let started = if life.start_on_record {
+        format!("Started {}", date_of(life.started))
+    } else if in_todo {
+        "Not started yet — drawn from when it was opened".to_string()
+    } else if life.tentative() {
+        "Start not set — drawn from when it was opened".to_string()
+    } else {
+        "Start not recorded — drawn from when it was opened".to_string()
     };
 
     let closed = match life.closed {

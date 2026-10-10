@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use task_manager_shared::goals::GoalResponse;
-use task_manager_shared::projects::{COLUMN_ID_DONE, COLUMN_ID_TODO};
+use task_manager_shared::projects::COLUMN_ID_DONE;
 use task_manager_shared::tasks::TaskResponse;
 
 use super::super::render::GoalStatus;
@@ -196,51 +196,69 @@ pub fn span_in_month(month: Month, from: i64, until: Option<i64>, now: i64) -> O
     })
 }
 
-/// When something was opened, when work on it started and when it was closed — on the wall clock.
-/// `started` is `None` for something nobody has started.
+/// When something was opened, where its bar begins and when it was closed — on the wall clock.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Life {
     pub opened: i64,
-    pub started: Option<i64>,
+    /// Where the bar begins: the start on record — or, with none, the moment it was opened, which is the
+    /// most the board knows.
+    pub started: i64,
     pub closed: Option<i64>,
+    /// Whether `started` is a start somebody recorded, rather than the opening standing in for one.
+    pub start_on_record: bool,
 }
 
-/// A goal's life. A goal under way with no start on record — one started before starts were recorded —
-/// counts from when it was opened, which is the most the board knows about it.
-pub fn goal_life(goal: &GoalResponse, status: GoalStatus, wall: &dyn Fn(i64) -> i64) -> Life {
-    let started = goal
-        .started_unix_seconds
-        .or_else(|| (status != GoalStatus::Todo).then_some(goal.created_unix_seconds));
+impl Life {
+    fn of(
+        opened: i64,
+        started: Option<i64>,
+        closed: Option<i64>,
+        wall: &dyn Fn(i64) -> i64,
+    ) -> Self {
+        Self {
+            opened: wall(opened),
+            started: wall(started.unwrap_or(opened)),
+            closed: closed.map(wall),
+            start_on_record: started.is_some(),
+        }
+    }
 
-    Life {
-        opened: wall(goal.created_unix_seconds),
-        started: started.map(wall),
-        closed: goal.closed_unix_seconds.map(wall),
+    /// Neither end on record: still open, and nobody has said when it started. Its bar — from when it was
+    /// opened to today — is a guess, and is drawn as one: dashed and see-through, there to be seen and to
+    /// be given its dates.
+    pub fn tentative(&self) -> bool {
+        !self.start_on_record && self.closed.is_none()
     }
 }
 
-/// A task's life, with the same reading for a task that left Todo before its start was recorded.
+pub fn goal_life(goal: &GoalResponse, wall: &dyn Fn(i64) -> i64) -> Life {
+    Life::of(
+        goal.created_unix_seconds,
+        goal.started_unix_seconds,
+        goal.closed_unix_seconds,
+        wall,
+    )
+}
+
 pub fn task_life(task: &TaskResponse, wall: &dyn Fn(i64) -> i64) -> Life {
-    let started = task
-        .started_unix_seconds
-        .or_else(|| (task.status != COLUMN_ID_TODO).then_some(task.created_unix_seconds));
-
-    Life {
-        opened: wall(task.created_unix_seconds),
-        started: started.map(wall),
-        closed: task.closed_unix_seconds.map(wall),
-    }
+    Life::of(
+        task.created_unix_seconds,
+        task.started_unix_seconds,
+        task.closed_unix_seconds,
+        wall,
+    )
 }
 
-/// What a row draws in one month: the work, and the wait before it.
+/// What a row draws in one month: the bar, and the wait before it.
 ///
-/// `work` is the bar proper — from the start to the close, or to today while it goes on. `waiting` is the
-/// time from being opened to being started, drawn as a dashed line: it is how something nobody has
-/// started is on the chart at all, and how long a thing sat before somebody took it up.
+/// `work` is the bar — from the start to the close, or to today while it goes on. `waiting` is the time
+/// from being opened to a start somebody recorded, drawn as a dashed line: how long a thing sat before it
+/// was taken up. `tentative` is [`Life::tentative`]: the bar is a guess.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Bars {
     pub waiting: Option<Span>,
     pub work: Option<Span>,
+    pub tentative: bool,
 }
 
 impl Bars {
@@ -250,15 +268,14 @@ impl Bars {
 }
 
 pub fn bars_in_month(month: Month, life: Life, now: i64) -> Bars {
-    let work = life
-        .started
-        .and_then(|started| span_in_month(month, started, life.closed, now));
+    let work = span_in_month(month, life.started, life.closed, now);
 
-    let waiting = match life.started {
-        // Started no later than it was opened — a start written down after the fact: nothing waited.
-        Some(started) if started <= life.opened => None,
-        Some(started) => span_in_month(month, life.opened, Some(started), now),
-        None => span_in_month(month, life.opened, life.closed, now),
+    // Only before a start somebody recorded, and only if it came after the opening — a start written down
+    // after the fact can be earlier, and then nothing waited.
+    let waiting = if life.start_on_record && life.started > life.opened {
+        span_in_month(month, life.opened, Some(life.started), now)
+    } else {
+        None
     };
 
     // Counted in days the two meet on the day work began, and that day is a day of work: the wait stops
@@ -277,7 +294,11 @@ pub fn bars_in_month(month: Month, life: Life, now: i64) -> Bars {
         (waiting, _) => waiting,
     };
 
-    Bars { waiting, work }
+    Bars {
+        waiting,
+        work,
+        tentative: life.tentative(),
+    }
 }
 
 /// The goals the timeline draws: the live list, and the closed goals that have aged off it.
@@ -350,14 +371,10 @@ impl Row {
     }
 }
 
-/// Where a row sorts: what has started first, in the order it started, and what is still waiting after
-/// it, in the order it was opened. The waterfall a timeline is read as.
+/// Where a row sorts: what has dates first, in the order it started, and what has none after it, in the
+/// order it was opened. The waterfall a timeline is read as.
 fn waterfall(life: &Life, id: &str) -> (bool, i64, String) {
-    (
-        life.started.is_none(),
-        life.started.unwrap_or(life.opened),
-        id.to_string(),
-    )
+    (life.tentative(), life.started, id.to_string())
 }
 
 /// The rows of one month: each goal that has anything to draw in it, and under each unfolded one, its tasks
@@ -378,7 +395,7 @@ pub fn lay_out(
     let mut lanes: Vec<GoalLane> = goals
         .into_iter()
         .filter_map(|(goal, status)| {
-            let life = goal_life(&goal, status, wall);
+            let life = goal_life(&goal, wall);
             let bars = bars_in_month(month, life, now);
 
             if bars.is_empty() {
@@ -695,8 +712,9 @@ mod tests {
         let first = october().start();
         let life = Life {
             opened: first + 9 * 3600,
-            started: Some(first + 4 * DAY + 10 * 3600),
+            started: first + 4 * DAY + 10 * 3600,
             closed: Some(first + 8 * DAY + 3600),
+            start_on_record: true,
         };
 
         let bars = bars_in_month(october(), life, OCT_7 + 10 * DAY);
@@ -705,7 +723,7 @@ mod tests {
         assert_eq!(days(bars.work), Some((4, 8)));
 
         let same_day = Life {
-            started: Some(first + 15 * 3600),
+            started: first + 15 * 3600,
             ..life
         };
         assert_eq!(
@@ -715,20 +733,26 @@ mod tests {
         );
     }
 
-    /// Nobody has started it: the whole of its life so far is a wait, still going today.
+    /// Neither a start nor an end on record: a bar all the same, from when it was opened to today — marked
+    /// as a guess, so it can be seen and given its dates.
     #[test]
-    fn what_has_not_started_is_a_wait_up_to_today() {
+    fn what_has_no_dates_is_a_tentative_bar_up_to_today() {
         let life = Life {
             opened: OCT_7,
-            started: None,
+            started: OCT_7,
             closed: None,
+            start_on_record: false,
         };
 
         let bars = bars_in_month(october(), life, OCT_7 + 3 * DAY);
 
-        assert_eq!(bars.work, None);
-        assert_eq!(days(bars.waiting), Some((6, 9)));
-        assert!(bars.waiting.unwrap().ongoing);
+        assert!(bars.tentative);
+        assert_eq!(
+            bars.waiting, None,
+            "no start on record, so no wait before one"
+        );
+        assert_eq!(days(bars.work), Some((6, 9)));
+        assert!(bars.work.unwrap().ongoing);
     }
 
     /// Opened in September, started in October: September shows only the wait, running off its edge.
@@ -736,8 +760,9 @@ mod tests {
     fn a_wait_that_crosses_a_month_ends_with_it() {
         let life = Life {
             opened: OCT_7 - 17 * DAY,
-            started: Some(OCT_7 - 4 * DAY),
+            started: OCT_7 - 4 * DAY,
             closed: None,
+            start_on_record: true,
         };
         let now = OCT_7 + 3 * DAY;
 
@@ -751,37 +776,32 @@ mod tests {
         assert_eq!(days(this_month.work), Some((2, 9)));
     }
 
-    /// Work that left Todo before starts were recorded is drawn from when it was opened — the most the
-    /// board knows — and work still in Todo is not started, whatever else is true of it.
+    /// With no start on record the bar begins where the thing was opened — the most the board knows —
+    /// and is a guess for as long as there is no end on record either.
     #[test]
-    fn work_with_no_start_on_record_counts_from_when_it_was_opened() {
+    fn with_no_start_on_record_the_bar_begins_at_the_opening() {
         let identity = |at: i64| at;
 
-        let legacy = task(
-            "RMS-1",
-            "RMS-G1",
-            task_manager_shared::projects::COLUMN_ID_DONE,
-            OCT_7,
+        let mut finished_long_ago = task("RMS-1", "RMS-G1", COLUMN_ID_DONE, OCT_7);
+        finished_long_ago.closed_unix_seconds = Some(OCT_7 + 2 * DAY);
+        let life = task_life(&finished_long_ago, &identity);
+        assert_eq!((life.started, life.start_on_record), (OCT_7, false));
+        assert!(
+            !life.tentative(),
+            "it has an end on record, so the bar is no guess"
         );
-        assert_eq!(task_life(&legacy, &identity).started, Some(OCT_7));
 
-        let queued = task("RMS-2", "RMS-G1", COLUMN_ID_TODO, OCT_7);
-        assert_eq!(task_life(&queued, &identity).started, None);
+        let queued = task("RMS-2", "RMS-G1", "todo", OCT_7);
+        assert!(task_life(&queued, &identity).tentative());
 
         let mut recorded = task("RMS-3", "RMS-G1", "in-progress", OCT_7);
         recorded.started_unix_seconds = Some(OCT_7 + DAY);
-        assert_eq!(task_life(&recorded, &identity).started, Some(OCT_7 + DAY));
+        let life = task_life(&recorded, &identity);
+        assert_eq!((life.started, life.start_on_record), (OCT_7 + DAY, true));
+        assert!(!life.tentative());
 
         let talked_about = goal("RMS-G1", OCT_7, None);
-        assert_eq!(
-            goal_life(&talked_about, GoalStatus::Todo, &identity).started,
-            None
-        );
-        assert_eq!(
-            goal_life(&talked_about, GoalStatus::InProgress, &identity).started,
-            Some(OCT_7),
-            "under way with no start on record"
-        );
+        assert!(goal_life(&talked_about, &identity).tentative());
     }
 
     #[test]
@@ -825,7 +845,7 @@ mod tests {
         assert_eq!(
             keys,
             ["RMS-G2", "RMS-G1", "RMS-G4"],
-            "in the order work began, what is still waiting last, and a goal of another month not at all"
+            "in the order work began, what has no dates last, and a goal of another month not at all"
         );
 
         let Row::Goal(marked) = &rows[1] else {
@@ -855,7 +875,7 @@ mod tests {
         let mut going = task("RMS-12", "RMS-G1", "in-progress", OCT_7 - 9 * DAY);
         going.started_unix_seconds = Some(OCT_7 - DAY);
 
-        let queued = task("RMS-13", "RMS-G1", COLUMN_ID_TODO, OCT_7);
+        let queued = task("RMS-13", "RMS-G1", "todo", OCT_7);
 
         let of_goal = HashMap::from([(
             "RMS-G1".to_string(),

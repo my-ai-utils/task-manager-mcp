@@ -3360,6 +3360,15 @@ button.task-view-check-row:hover {
   background-size: 6px 2px;
 }
 
+.gantt-legend-tentative {
+  display: inline-block;
+  width: 18px;
+  height: 8px;
+  border-radius: 3px;
+  border: 1.5px dashed var(--text-muted);
+  background: rgba(107, 119, 140, 0.3);
+}
+
 .gantt-legend-work {
   display: inline-block;
   width: 18px;
@@ -3373,5 +3382,20 @@ button.task-view-check-row:hover {
   background: rgba(13, 110, 253, 0.1);
   border-color: var(--accent);
   color: var(--accent);
+}
+
+/* Neither a start nor an end on record: a bar all the same, from when it was opened to today — see-through
+   inside a dashed edge of its colour (both inline), so it is plainly there and plainly not a record. Its
+   text is dark, since white would be lost on the lighter fill. */
+.gantt-bar.tentative {
+  border-width: 1.5px;
+  border-style: dashed;
+  color: var(--text);
+  text-shadow: none;
+  box-shadow: none;
+}
+
+.gantt-bar.task.tentative {
+  opacity: 1;
 }
 
